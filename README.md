@@ -23,7 +23,7 @@ The mod includes two editor UIs, which is changed in the F12 menu:
 
 ## Disclaimer
 
-This mod was ~80% made with Codex/Chat GPT 5.5, I have done my best to ensure this has not impacted the quality. Please let me know if you find any issues at all on the mod page.
+This mod was mostly made with Codex/Chat GPT 5.5, I have done my best to ensure this has not impacted the quality. Please let me know if you find any issues at all on the mod page.
 
 ## MIT License
 
