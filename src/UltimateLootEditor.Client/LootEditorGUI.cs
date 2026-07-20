@@ -498,7 +498,7 @@ namespace ULE.SpawnEditor
             }
             GUI.enabled = true;
 
-            GUILayout.Label($"{activeIndex}/{candidateCount}", GUILayout.Width(44));
+            GUILayout.Label($"Spawn {activeIndex}/{candidateCount}", GUILayout.Width(86));
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
 

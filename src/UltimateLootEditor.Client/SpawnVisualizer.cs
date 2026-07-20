@@ -4,7 +4,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using EFT;
+using EFT.UI.Screens;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace ULE.SpawnEditor
 {
@@ -13,6 +15,12 @@ namespace ULE.SpawnEditor
         private const float SpatialCellSize = 20f;
         private const int MaxWorldLabels = 10;
         private const float VisibilityRefreshInterval = 0.75f;
+        private const float WorldLabelHeightOffset = 0.28f;
+        private const int WorldLabelCanvasSortingOrder = -1000;
+        private const int WorldLabelFontSize = 14;
+        private const float WorldLabelScreenWidth = 180f;
+        private const float WorldLabelScreenHeight = 22f;
+        private const float WorldLabelScreenYOffset = 3f;
 
         private List<SpawnPointData> _spawns = new List<SpawnPointData>();
         private readonly Dictionary<string, SpawnPointData> _spawnById = new Dictionary<string, SpawnPointData>(StringComparer.Ordinal);
@@ -20,6 +28,7 @@ namespace ULE.SpawnEditor
         private readonly Dictionary<Vector2Int, List<SpawnPointData>> _spatialBuckets = new Dictionary<Vector2Int, List<SpawnPointData>>();
         private readonly List<SpawnPointData> _nearbySpawns = new List<SpawnPointData>(128);
         private readonly List<SpawnPointData> _visibleSpawns = new List<SpawnPointData>(64);
+        private readonly List<WorldLabelEntry> _worldLabels = new List<WorldLabelEntry>(MaxWorldLabels);
         private readonly List<string> _editorCandidateSpawnIds = new List<string>();
         private readonly Dictionary<string, SpawnPointData> _editorSessionDraftsById = new Dictionary<string, SpawnPointData>(StringComparer.Ordinal);
         private readonly HashSet<string> _editorSessionDirtySpawnIds = new HashSet<string>(StringComparer.Ordinal);
@@ -44,6 +53,9 @@ namespace ULE.SpawnEditor
         private SpawnPointData _activeSourceSpawn;
         private bool _activeSpawnDirty;
         private int _editorCandidateIndex = -1;
+        private GameObject _worldLabelCanvasRoot;
+        private RectTransform _worldLabelCanvasRect;
+        private Font _worldLabelFont;
 
         public SpawnPointData ActiveSpawn { get; private set; }
 
@@ -119,6 +131,7 @@ namespace ULE.SpawnEditor
             _editorCandidateSpawnIds.Clear();
             _editorSessionDraftsById.Clear();
             _editorSessionDirtySpawnIds.Clear();
+            DestroyWorldLabels();
 
             _spawnIndexReady = false;
             _looseLootPath = null;
@@ -153,6 +166,7 @@ namespace ULE.SpawnEditor
                 {
                     _visibleSpawns.Clear();
                     _hasLastVisibilityOrigin = false;
+                    HideWorldLabels();
                     LogDebug("[ULE] Visualizer disabled.");
                 }
             }
@@ -187,6 +201,7 @@ namespace ULE.SpawnEditor
 
             if (!_visible || _visibleSpawns.Count == 0)
             {
+                HideWorldLabels();
                 return;
             }
 
@@ -208,6 +223,8 @@ namespace ULE.SpawnEditor
                         0);
                 }
             }
+
+            UpdateWorldLabels(GetActiveCamera());
         }
 
         public void CommitEdits(SpawnPointData edited)
@@ -1137,17 +1154,22 @@ namespace ULE.SpawnEditor
                     : $"Ultimate Loot Editor: failed to load loose loot data - {_spawnIndexLoadError}";
                 GUI.Box(new Rect(20f, 20f, 420f, 28f), message);
             }
+        }
 
-            if (!_spawnIndexReady || !Plugin.DrawWorldLabels.Value)
+        private void UpdateWorldLabels(Camera activeCamera)
+        {
+            if (!_visible ||
+                !_spawnIndexReady ||
+                !Plugin.DrawWorldLabels.Value ||
+                IsRaidPauseMenuOpen() ||
+                activeCamera == null ||
+                _visibleSpawns.Count == 0)
             {
+                HideWorldLabels();
                 return;
             }
 
-            var activeCamera = GetActiveCamera();
-            if (activeCamera == null)
-            {
-                return;
-            }
+            EnsureWorldLabelPool();
 
             var labelsDrawn = 0;
             foreach (var spawn in _visibleSpawns)
@@ -1157,16 +1179,124 @@ namespace ULE.SpawnEditor
                     break;
                 }
 
-                var wp = spawn.Position + Vector3.up * 0.6f;
-                var sp = activeCamera.WorldToScreenPoint(wp);
-                if (sp.z <= 0f)
+                var position = spawn.Position + Vector3.up * WorldLabelHeightOffset;
+                var screen = activeCamera.WorldToScreenPoint(position);
+                if (screen.z <= 0f)
                 {
                     continue;
                 }
 
-                var rect = new Rect(sp.x - 120f, Screen.height - sp.y - 10f, 240f, 20f);
-                GUI.Label(rect, GetSpawnLabel(spawn.Id));
+                var entry = _worldLabels[labelsDrawn];
+                entry.Text.text = GetSpawnLabel(spawn.Id);
+                entry.Rect.anchoredPosition = new Vector2(screen.x, screen.y + WorldLabelScreenYOffset);
+                entry.Root.SetActive(true);
                 labelsDrawn++;
+            }
+
+            for (var i = labelsDrawn; i < _worldLabels.Count; i++)
+            {
+                _worldLabels[i].Root.SetActive(false);
+            }
+        }
+
+        private void EnsureWorldLabelPool()
+        {
+            if (_worldLabelFont == null)
+            {
+                _worldLabelFont = Resources.GetBuiltinResource<Font>("Arial.ttf");
+            }
+
+            if (_worldLabelCanvasRoot == null)
+            {
+                _worldLabelCanvasRoot = new GameObject("ULE_WorldSpawnLabelCanvas");
+                _worldLabelCanvasRoot.transform.SetParent(transform, false);
+                var uiLayer = LayerMask.NameToLayer("UI");
+                if (uiLayer >= 0)
+                {
+                    _worldLabelCanvasRoot.layer = uiLayer;
+                }
+
+                var canvas = _worldLabelCanvasRoot.AddComponent<Canvas>();
+                canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                canvas.overrideSorting = true;
+                canvas.sortingOrder = WorldLabelCanvasSortingOrder;
+
+                _worldLabelCanvasRect = _worldLabelCanvasRoot.transform as RectTransform;
+            }
+
+            while (_worldLabels.Count < MaxWorldLabels)
+            {
+                _worldLabels.Add(CreateWorldLabel());
+            }
+        }
+
+        private WorldLabelEntry CreateWorldLabel()
+        {
+            var root = new GameObject("ULE_WorldSpawnLabel");
+            root.transform.SetParent(_worldLabelCanvasRoot.transform, false);
+            root.layer = _worldLabelCanvasRoot.layer;
+
+            var rect = root.AddComponent<RectTransform>();
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.zero;
+            rect.pivot = new Vector2(0.5f, 0.5f);
+            rect.sizeDelta = new Vector2(WorldLabelScreenWidth, WorldLabelScreenHeight);
+
+            var text = root.AddComponent<Text>();
+            text.font = _worldLabelFont;
+            text.fontSize = WorldLabelFontSize;
+            text.alignment = TextAnchor.MiddleCenter;
+            text.horizontalOverflow = HorizontalWrapMode.Overflow;
+            text.verticalOverflow = VerticalWrapMode.Overflow;
+            text.color = Color.white;
+            text.raycastTarget = false;
+            text.text = string.Empty;
+
+            root.SetActive(false);
+            return new WorldLabelEntry(root, rect, text);
+        }
+
+        private void HideWorldLabels()
+        {
+            foreach (var label in _worldLabels)
+            {
+                if (label.Root != null)
+                {
+                    label.Root.SetActive(false);
+                }
+            }
+        }
+
+        private void DestroyWorldLabels()
+        {
+            foreach (var label in _worldLabels)
+            {
+                if (label.Root != null)
+                {
+                    Destroy(label.Root);
+                }
+            }
+
+            _worldLabels.Clear();
+
+            if (_worldLabelCanvasRoot != null)
+            {
+                Destroy(_worldLabelCanvasRoot);
+                _worldLabelCanvasRoot = null;
+                _worldLabelCanvasRect = null;
+            }
+        }
+
+        private static bool IsRaidPauseMenuOpen()
+        {
+            try
+            {
+                var current = CurrentScreenSingletonClass.CurrentScreenSingletonClass?.CurrentScreenController;
+                return current != null && current.ScreenType == EEftScreenType.MainMenu;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -1286,6 +1416,20 @@ namespace ULE.SpawnEditor
         {
             public SpawnPointData Spawn { get; set; }
             public string Error { get; set; } = string.Empty;
+        }
+
+        private sealed class WorldLabelEntry
+        {
+            public WorldLabelEntry(GameObject root, RectTransform rect, Text text)
+            {
+                Root = root;
+                Rect = rect;
+                Text = text;
+            }
+
+            public GameObject Root { get; }
+            public RectTransform Rect { get; }
+            public Text Text { get; }
         }
     }
 }

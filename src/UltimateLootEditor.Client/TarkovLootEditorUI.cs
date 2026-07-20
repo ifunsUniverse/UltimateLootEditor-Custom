@@ -1,5 +1,6 @@
 #region TarkovLootEditorUI.cs
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -142,10 +143,10 @@ namespace ULE.SpawnEditor
         private const float NativeCompareStatusSpacing = 8f;
         private const float NativeRowTextLeftInset = 98f;
         private const float NativeRowTextRightPadding = 10f;
-        private const int NativeVirtualizedRowThreshold = 24;
+        private const int NativeVirtualizedRowThreshold = 10;
         private const int NativeVirtualizedRowBuffer = 4;
-        private const int NativeVirtualizedMinRows = 12;
-        private const int NativeVirtualizedMaxResizePoolRows = 48;
+        private const int NativeVirtualizedMinRows = 10;
+        private const int NativeVirtualizedMaxResizePoolRows = 28;
         private const int EditorCanvasSortingOrder = 3000;
         private const float EditorCursorReapplyIntervalSeconds = 0.12f;
 
@@ -213,6 +214,9 @@ namespace ULE.SpawnEditor
         private float _lastEditorCursorApplyAt;
         private EventSystem _previousEventSystem;
         private GameObject _editorEventSystemRoot;
+        private Coroutine _prewarmCoroutine;
+        private bool _prewarmComplete;
+        private float _nextPrewarmAttemptAt;
         private static MethodInfo _setIgnoreInputMethod;
         private static MethodInfo _setIgnoreInputWithKeepResetLookMethod;
         private static bool _setIgnoreInputLookupAttempted;
@@ -252,8 +256,10 @@ namespace ULE.SpawnEditor
 
             if (!LootEditorGUI.Open || _viz == null || _viz.ActiveSpawn == null)
             {
-                DestroyRoot();
+                TryStartClosedEditorPrewarm();
+                HideRoot();
                 ReleaseInputCapture();
+                DestroyEditorEventSystem();
                 ResetWindowSessionState();
                 return;
             }
@@ -324,6 +330,7 @@ namespace ULE.SpawnEditor
             {
                 EnsureEditorEventSystem();
                 _root.SetActive(true);
+                _inspectInputWindow?.ResetInterceptedClose();
                 if (!_usingNativeInspectWindowContainer)
                 {
                     EnsureEditorCanvasLayer();
@@ -409,6 +416,63 @@ namespace ULE.SpawnEditor
             contentElement.minHeight = 1f;
 
             _lastBuildKey = string.Empty;
+        }
+
+        private void TryStartClosedEditorPrewarm()
+        {
+            if (_prewarmComplete ||
+                _prewarmCoroutine != null ||
+                _root != null ||
+                Time.unscaledTime < _nextPrewarmAttemptAt)
+            {
+                return;
+            }
+
+            if (!CanPrewarmInspectWindowShell())
+            {
+                _nextPrewarmAttemptAt = Time.unscaledTime + 1.5f;
+                return;
+            }
+
+            _prewarmCoroutine = StartCoroutine(PrewarmClosedEditor());
+        }
+
+        private IEnumerator PrewarmClosedEditor()
+        {
+            _nextPrewarmAttemptAt = Time.unscaledTime + 5f;
+
+            EnsureRoot();
+            HideRoot();
+            DestroyEditorEventSystem();
+            yield return null;
+
+            ResolveHandbookEntityRowTemplate();
+            yield return null;
+
+            ResolveHandbookEntityScrollTemplate();
+            yield return null;
+
+            ResolveNativeTextInputTemplate();
+            ResolveNativeCloseButtonTemplate();
+            HideRoot();
+            DestroyEditorEventSystem();
+
+            _prewarmComplete = _root != null;
+            _prewarmCoroutine = null;
+        }
+
+        private static bool CanPrewarmInspectWindowShell()
+        {
+            try
+            {
+                var itemUiContext = ItemUiContext.Instance;
+                return itemUiContext != null &&
+                       GetPrivateField<InfoWindow>(itemUiContext, "_infoWindowTemplate") != null;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private void EnsureEditorCanvasLayer()
@@ -1809,10 +1873,11 @@ namespace ULE.SpawnEditor
 
             var count = Mathf.Max(1, _viz.EditorCandidateCount);
             var active = Mathf.Clamp(_viz.ActiveEditorCandidateIndex + 1, 1, count);
+            var navLabelWidth = 96f;
             CreateNativeButtonStrip(header, "NativeNavigationRow", buttonHeight)
-                .RightAt(18f, 62f, 46f * 2f + 70f + NativeButtonSpacing * 2f, buttonHeight)
+                .RightAt(18f, 62f, 46f * 2f + navLabelWidth + NativeButtonSpacing * 2f, buttonHeight)
                 .AddButton("<", _viz.CanNavigateEditorPrevious, () => Navigate(-1), 46f, "Navigation.Previous")
-                .AddLabel($"{active}/{count}", 70f, "Navigation.PageLabel", TextAlignmentOptions.Center)
+                .AddLabel($"Spawn {active}/{count}", navLabelWidth, "Navigation.SpawnIndexLabel", TextAlignmentOptions.Center)
                 .AddButton(">", _viz.CanNavigateEditorNext, () => Navigate(1), 46f, "Navigation.Next");
         }
 
@@ -2209,26 +2274,57 @@ namespace ULE.SpawnEditor
             }
 
             var rowStride = NativeResultRowHeight + NativeResultRowSpacing;
-            var visibleRows = CalculateNativeVirtualizedRowPoolSize(scrollRect, scrollTransform, rowStride, rows.Count);
-            var pooledRows = new List<GameObject>(visibleRows);
-            for (var i = 0; i < visibleRows; i++)
-            {
-                var row = Instantiate(templateRow.gameObject, content, false);
-                row.name = "ULE_HandbookSpawnItemRow";
-                row.SetActive(false);
-                SetLayerRecursively(row, content.gameObject.layer);
-                pooledRows.Add(row);
-            }
+            var pooledRows = new List<GameObject>();
 
             var currentStart = -1;
 
+            void EnsurePoolSize()
+            {
+                var targetRows = CalculateNativeVirtualizedRowPoolSize(scrollRect, scrollTransform, rowStride, rows.Count);
+                while (pooledRows.Count < targetRows)
+                {
+                    var row = Instantiate(templateRow.gameObject, content, false);
+                    row.name = "ULE_HandbookSpawnItemRow";
+                    row.SetActive(false);
+                    SetLayerRecursively(row, content.gameObject.layer);
+                    pooledRows.Add(row);
+                    currentStart = -1;
+                }
+            }
+
+            void BindRow(GameObject pooledRow, int rowIndex)
+            {
+                if (pooledRow == null)
+                {
+                    return;
+                }
+
+                if (rowIndex < 0 || rowIndex >= rows.Count)
+                {
+                    pooledRow.SetActive(false);
+                    return;
+                }
+
+                if (!TryBindNativeHandbookSpawnItemRow(pooledRow, rows[rowIndex], rowIndex))
+                {
+                    pooledRow.SetActive(false);
+                }
+            }
+
             void Refresh()
             {
+                EnsurePoolSize();
+                var pooledRowCount = pooledRows.Count;
+                if (pooledRowCount <= 0)
+                {
+                    return;
+                }
+
                 var viewportHeight = GetNativeViewportHeight(scrollRect, scrollTransform);
                 var contentHeight = Mathf.Max(NativeResultRowHeight, content.rect.height);
                 var scrollableHeight = Mathf.Max(0f, contentHeight - viewportHeight);
                 var topOffset = Mathf.Clamp(content.anchoredPosition.y, 0f, scrollableHeight);
-                var maxStart = Mathf.Max(0, rows.Count - visibleRows);
+                var maxStart = Mathf.Max(0, rows.Count - pooledRowCount);
                 var startIndex = Mathf.Clamp(
                     Mathf.FloorToInt(topOffset / rowStride) - NativeVirtualizedRowBuffer / 2,
                     0,
@@ -2239,21 +2335,34 @@ namespace ULE.SpawnEditor
                     return;
                 }
 
-                currentStart = startIndex;
-                for (var poolIndex = 0; poolIndex < pooledRows.Count; poolIndex++)
+                if (currentStart >= 0 && pooledRows.Count > 0)
                 {
-                    var rowIndex = startIndex + poolIndex;
-                    var pooledRow = pooledRows[poolIndex];
-                    if (rowIndex >= rows.Count)
+                    if (startIndex == currentStart + 1)
                     {
-                        pooledRow.SetActive(false);
-                        continue;
+                        var row = pooledRows[0];
+                        pooledRows.RemoveAt(0);
+                        pooledRows.Add(row);
+                        BindRow(row, startIndex + pooledRowCount - 1);
+                        currentStart = startIndex;
+                        return;
                     }
 
-                    if (!TryBindNativeHandbookSpawnItemRow(pooledRow, rows[rowIndex], rowIndex))
+                    if (startIndex == currentStart - 1)
                     {
-                        pooledRow.SetActive(false);
+                        var last = pooledRows.Count - 1;
+                        var row = pooledRows[last];
+                        pooledRows.RemoveAt(last);
+                        pooledRows.Insert(0, row);
+                        BindRow(row, startIndex);
+                        currentStart = startIndex;
+                        return;
                     }
+                }
+
+                currentStart = startIndex;
+                for (var poolIndex = 0; poolIndex < pooledRowCount; poolIndex++)
+                {
+                    BindRow(pooledRows[poolIndex], startIndex + poolIndex);
                 }
             }
 
@@ -2274,18 +2383,6 @@ namespace ULE.SpawnEditor
             }
 
             var viewportHeight = GetNativeViewportHeight(scrollRect, scrollTransform);
-            if (_window != null)
-            {
-                var areaSize = GetClampAreaSize(_window);
-                if (areaSize.y > 1f)
-                {
-                    var largestLikelyViewport = Mathf.Max(
-                        NativeResultsHeight,
-                        areaSize.y - NativeHeaderHeight - NativeFooterHeight - (NativeResultRowSpacing * 4f));
-                    viewportHeight = Mathf.Max(viewportHeight, largestLikelyViewport);
-                }
-            }
-
             var rowsNeeded = Mathf.CeilToInt(viewportHeight / Mathf.Max(1f, rowStride)) + NativeVirtualizedRowBuffer;
             return Mathf.Min(
                 rowCount,
@@ -2537,6 +2634,10 @@ namespace ULE.SpawnEditor
             {
                 row.name = "ULE_HandbookSpawnItemRow";
                 row.SetActive(true);
+                var rebindGuard = row.GetComponent<CanvasGroup>() ?? row.AddComponent<CanvasGroup>();
+                rebindGuard.alpha = 0f;
+                rebindGuard.blocksRaycasts = false;
+                rebindGuard.interactable = false;
 
                 var rowRect = row.transform as RectTransform;
                 PositionHandbookContentRow(rowRect, rowIndex);
@@ -2555,6 +2656,8 @@ namespace ULE.SpawnEditor
                     var wishlist = TryGetWishlistManager();
                     if (wishlist != null)
                     {
+                        ResetNativeHandbookRowForRebind(row, view);
+                        RestoreHandbookIconForNativeBind(view);
                         view.enabled = true;
                         view.Show(node, _ => { }, wishlist);
                         HideHandbookRowNoise(view);
@@ -2564,17 +2667,81 @@ namespace ULE.SpawnEditor
                         ReserveHandbookRowControlSpace(row, GetNativeRowReservedWidth(rowData));
                         ReplaceHandbookRowTextWithClampedOverlay(rowRect, rowData, GetNativeRowReservedWidth(rowData));
                         AddNativeActionButtonToSpawnItemRow(rowRect, rowData);
+                        rebindGuard.alpha = 1f;
+                        rebindGuard.blocksRaycasts = true;
+                        rebindGuard.interactable = true;
                         return true;
                     }
                 }
 
-                return TryPopulateHandbookRowFallback(row, rowData);
+                if (TryPopulateHandbookRowFallback(row, rowData))
+                {
+                    rebindGuard.alpha = 1f;
+                    rebindGuard.blocksRaycasts = true;
+                    rebindGuard.interactable = true;
+                    return true;
+                }
+
+                row.SetActive(false);
+                return false;
             }
             catch (Exception ex)
             {
                 row.SetActive(false);
                 _log?.LogDebug($"[ULE] Native Handbook spawn row fallback: {ex.Message}");
                 return false;
+            }
+        }
+
+        private static void ResetNativeHandbookRowForRebind(GameObject row, EntityListElement view)
+        {
+            if (row == null || view == null)
+            {
+                return;
+            }
+
+            try
+            {
+                view.Close();
+            }
+            catch
+            {
+                // Some template clones have never been shown. In that case there is no native state to release.
+            }
+
+            row.SetActive(true);
+        }
+
+        private static void RestoreHandbookIconForNativeBind(EntityListElement view)
+        {
+            if (view == null)
+            {
+                return;
+            }
+
+            EnsureHandbookRowFields();
+            if (!(_handbookEntityIconField?.GetValue(view) is Component iconComponent) || iconComponent.gameObject == null)
+            {
+                return;
+            }
+
+            var iconObject = iconComponent.gameObject;
+            iconObject.SetActive(true);
+            foreach (var behaviour in iconObject.GetComponentsInChildren<Behaviour>(true))
+            {
+                if (behaviour != null)
+                {
+                    behaviour.enabled = true;
+                }
+            }
+
+            foreach (var graphic in iconObject.GetComponentsInChildren<Graphic>(true))
+            {
+                if (graphic != null)
+                {
+                    graphic.enabled = true;
+                    graphic.raycastTarget = false;
+                }
             }
         }
 
@@ -2752,7 +2919,6 @@ namespace ULE.SpawnEditor
             if (view != null)
             {
                 view.Boolean_0 = true;
-                view.enabled = false;
             }
 
             if (row == null)
@@ -4241,9 +4407,9 @@ namespace ULE.SpawnEditor
 
             var count = Mathf.Max(1, _viz.EditorCandidateCount);
             var active = Mathf.Clamp(_viz.ActiveEditorCandidateIndex + 1, 1, count);
-            var indexText = CreateText(row, "CandidateIndex", $"{active}/{count}", 12, FontStyle.Normal, SubtleTextColor);
+            var indexText = CreateText(row, "CandidateIndex", $"Spawn {active}/{count}", 12, FontStyle.Normal, SubtleTextColor);
             indexText.alignment = TextAnchor.MiddleCenter;
-            SetLayout(indexText.rectTransform, minWidth: 54f);
+            SetLayout(indexText.rectTransform, minWidth: 86f);
 
             CreateModeButton(row, "Edited", EditorViewMode.Edited);
             CreateModeButton(row, "Vanilla", EditorViewMode.Vanilla);
@@ -4744,7 +4910,8 @@ namespace ULE.SpawnEditor
             ReleaseInputCapture();
             _viz?.CloseEditorWithoutSaving();
             LootEditorGUI.Open = false;
-            DestroyRoot();
+            HideRoot();
+            DestroyEditorEventSystem();
             ResetWindowSessionState();
         }
 
