@@ -734,7 +734,7 @@ namespace ULE.SpawnEditor
             var attachmentCount = CountChildNodes(rootItem?.Children);
             if (attachmentCount > 0)
             {
-                label = $"{label} [+{attachmentCount}]";
+                label = $"{label} [Parts: {attachmentCount}]";
             }
 
             return RuntimeItemSourceCatalog.PrefixDisplayName(rootTpl, label);

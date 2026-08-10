@@ -2,7 +2,7 @@ using System.Collections;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using SPTarkov.Server.Core.Services;
+using SPTarkov.Server.Core.Models.Spt.Tables;
 using UltimateLootEditor.Shared;
 using UltimateLootEditor.Util;
 
@@ -14,7 +14,8 @@ public static class RuntimeTemplateIndex
     private static readonly HashSet<string> Templates = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, string> DisplayNames = new(StringComparer.OrdinalIgnoreCase);
     private static Dictionary<string, string>? _sourceByTpl;
-    private static DatabaseService? _databaseService;
+    private static TemplateTable? _templateTable;
+    private static LocaleTable? _localeTable;
     private static DateTime _lastRefreshUtc = DateTime.MinValue;
     private static bool _initialized;
 
@@ -29,17 +30,18 @@ public static class RuntimeTemplateIndex
         }
     }
 
-    public static void Initialize(DatabaseService databaseService)
+    public static void Initialize(TemplateTable templateTable, LocaleTable localeTable)
     {
-        if (databaseService == null)
+        if (templateTable == null)
         {
             return;
         }
 
         lock (Sync)
         {
-            _databaseService = databaseService;
-            RebuildLocked(databaseService, "loaded");
+            _templateTable = templateTable;
+            _localeTable = localeTable;
+            RebuildLocked(templateTable, localeTable, "loaded");
         }
     }
 
@@ -85,13 +87,14 @@ public static class RuntimeTemplateIndex
         return string.IsNullOrWhiteSpace(fallbackName) ? "unknown item" : fallbackName.Trim();
     }
 
-    public static IReadOnlyDictionary<string, string> GetRuntimeItemSources(DatabaseService databaseService)
+    public static IReadOnlyDictionary<string, string> GetRuntimeItemSources(TemplateTable templateTable, LocaleTable localeTable)
     {
         lock (Sync)
         {
-            if (databaseService != null)
+            if (templateTable != null)
             {
-                _databaseService = databaseService;
+                _templateTable = templateTable;
+                _localeTable = localeTable;
             }
 
             RefreshIfChangedOrThrottledLocked(forceCountCheck: true);
@@ -109,14 +112,14 @@ public static class RuntimeTemplateIndex
 
     private static void RefreshIfChangedOrThrottledLocked(bool forceCountCheck = false)
     {
-        if (_databaseService == null)
+        if (_templateTable == null)
         {
             return;
         }
 
         if (!_initialized || Templates.Count == 0)
         {
-            RebuildLocked(_databaseService, "loaded");
+            RebuildLocked(_templateTable, _localeTable, "loaded");
             return;
         }
 
@@ -129,10 +132,10 @@ public static class RuntimeTemplateIndex
                 return;
             }
 
-            var runtimeCount = CountTemplateEntries(_databaseService.GetItems());
+            var runtimeCount = CountTemplateEntries(_templateTable.Items);
             if (runtimeCount != Templates.Count)
             {
-                RebuildLocked(_databaseService, "refreshed");
+                RebuildLocked(_templateTable, _localeTable, "refreshed");
                 return;
             }
 
@@ -142,12 +145,12 @@ public static class RuntimeTemplateIndex
         {
             if ((DateTime.UtcNow - _lastRefreshUtc).TotalSeconds >= 1d)
             {
-                RebuildLocked(_databaseService, "refreshed");
+                RebuildLocked(_templateTable, _localeTable, "refreshed");
             }
         }
     }
 
-    private static void RebuildLocked(DatabaseService databaseService, string verb)
+    private static void RebuildLocked(TemplateTable templateTable, LocaleTable? localeTable, string verb)
     {
         Templates.Clear();
         DisplayNames.Clear();
@@ -155,8 +158,8 @@ public static class RuntimeTemplateIndex
 
         try
         {
-            var items = databaseService.GetItems();
-            var localeNames = BuildLocaleNameLookup(databaseService);
+            var items = templateTable.Items;
+            var localeNames = BuildLocaleNameLookup(localeTable);
             foreach (var (tpl, item) in EnumerateTemplateEntries(items))
             {
                 if (string.IsNullOrWhiteSpace(tpl))
@@ -302,45 +305,43 @@ public static class RuntimeTemplateIndex
         return string.Empty;
     }
 
-    private static Dictionary<string, string> BuildLocaleNameLookup(DatabaseService databaseService)
+    private static Dictionary<string, string> BuildLocaleNameLookup(LocaleTable? localeTable)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         try
         {
-            var locales = databaseService.GetLocales();
-            if (locales == null)
+            if (localeTable?.Global == null)
             {
                 return result;
             }
 
-            var dictionary = InvokeInstanceMethod(locales, "GetDictionary");
-            if (dictionary is IDictionary outer)
+            foreach (var localeEntry in localeTable.Global)
             {
-                foreach (DictionaryEntry localeEntry in outer)
+                var localeDict = localeEntry.Value?.Value?.ExtensionData;
+                if (localeDict == null)
                 {
-                    if (localeEntry.Value is IDictionary localeDict)
+                    continue;
+                }
+
+                foreach (var entry in localeDict)
+                {
+                    var key = entry.Key;
+                    if (string.IsNullOrWhiteSpace(key) ||
+                        !key.EndsWith(" Name", StringComparison.OrdinalIgnoreCase))
                     {
-                        foreach (DictionaryEntry entry in localeDict)
-                        {
-                            var key = entry.Key?.ToString();
-                            if (string.IsNullOrWhiteSpace(key) ||
-                                !key.EndsWith(" Name", StringComparison.OrdinalIgnoreCase))
-                            {
-                                continue;
-                            }
+                        continue;
+                    }
 
-                            var tpl = key.Substring(0, key.Length - " Name".Length);
-                            if (!LooksLikeTemplateId(tpl))
-                            {
-                                continue;
-                            }
+                    var tpl = key.Substring(0, key.Length - " Name".Length);
+                    if (!LooksLikeTemplateId(tpl))
+                    {
+                        continue;
+                    }
 
-                            var name = entry.Value?.ToString()?.Trim();
-                            if (!string.IsNullOrWhiteSpace(name))
-                            {
-                                result.TryAdd(tpl, name);
-                            }
-                        }
+                    var name = entry.Value?.ToString()?.Trim();
+                    if (!string.IsNullOrWhiteSpace(name))
+                    {
+                        result.TryAdd(tpl, name);
                     }
                 }
             }
@@ -348,13 +349,6 @@ public static class RuntimeTemplateIndex
         catch { }
 
         return result;
-    }
-
-    private static object InvokeInstanceMethod(object target, string methodName)
-    {
-        return target?.GetType()
-            .GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-            ?.Invoke(target, Array.Empty<object>());
     }
 
     private static string ReadStringMember(object target, string name)

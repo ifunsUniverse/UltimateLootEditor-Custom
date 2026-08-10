@@ -3,6 +3,7 @@ bin/
 obj/
 tmp-build/
 tools/
+release/
 
 *.user
 *.suo

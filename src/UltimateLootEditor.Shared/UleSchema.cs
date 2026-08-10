@@ -11,11 +11,23 @@ namespace UltimateLootEditor.Shared
 
     public sealed class UleSpawnOverride
     {
+        public bool IsCreated { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public UleVector3 Position { get; set; }
+        public UleVector3 Rotation { get; set; }
         public double SpawnChance { get; set; } = 1.0;
         public bool? IsAlwaysSpawn { get; set; }
+        public bool? UseGravity { get; set; }
         public List<UleItemEntry> Items { get; set; } = new List<UleItemEntry>();
         public int? MinRolls { get; set; } = 1;
         public int? MaxRolls { get; set; } = 1;
+    }
+
+    public sealed class UleVector3
+    {
+        public double X { get; set; }
+        public double Y { get; set; }
+        public double Z { get; set; }
     }
 
     public class UleItemNode

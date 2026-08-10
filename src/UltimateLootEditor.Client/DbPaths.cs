@@ -97,7 +97,7 @@ namespace ULE.SpawnEditor
         {
             string root = BepInEx.Paths.GameRootPath;
 
-            var preferred = Path.Combine(root, "SPT", "SPT_Data", "database", "locales", "global", "en.json");
+            var preferred = Path.Combine(root, "SPT_Runtime", "SPT_Data", "database", "locales", "global", "en.json");
             if (File.Exists(preferred))
             {
                 return preferred;
@@ -105,6 +105,8 @@ namespace ULE.SpawnEditor
 
             string[] candidates =
             {
+                Path.Combine(root, "SPT_Runtime", "SPT_Data", "database", "locales", "global", "en.json"),
+                Path.Combine(root, "SPT", "SPT_Data", "database", "locales", "global", "en.json"),
                 Path.Combine(root, "SPT_Data", "database", "locales", "global", "en.json"),
                 Path.Combine(root, "SPT_Data", "Server", "database", "locales", "global", "en.json"),
                 Path.Combine(root, "Aki_Data", "database", "locales", "global", "en.json"),
@@ -120,6 +122,7 @@ namespace ULE.SpawnEditor
 
             string[] candidates =
             {
+                Path.Combine(root, "SPT_Runtime", "SPT_Data", "database", "templates", "items.json"),
                 Path.Combine(root, "SPT", "SPT_Data", "database", "templates", "items.json"),
                 Path.Combine(root, "SPT_Data", "database", "templates", "items.json"),
                 Path.Combine(root, "SPT_Data", "Server", "database", "templates", "items.json"),
@@ -136,6 +139,7 @@ namespace ULE.SpawnEditor
 
             string[] candidates =
             {
+                Path.Combine(root, "SPT_Runtime", "SPT_Data", "database", "globals.json"),
                 Path.Combine(root, "SPT", "SPT_Data", "database", "globals.json"),
                 Path.Combine(root, "SPT_Data", "database", "globals.json"),
                 Path.Combine(root, "SPT_Data", "Server", "database", "globals.json"),
@@ -216,15 +220,22 @@ namespace ULE.SpawnEditor
 
             foreach (var folder in folderCandidates)
             {
-                var preferred = Path.Combine(root, "SPT", "SPT_Data", "database", "locations", folder, "looseLoot.json");
+                var preferred = Path.Combine(root, "SPT_Runtime", "SPT_Data", "database", "locations", folder, "looseLoot.json");
                 if (File.Exists(preferred))
                 {
                     return preferred;
+                }
+
+                var legacyPreferred = Path.Combine(root, "SPT", "SPT_Data", "database", "locations", folder, "looseLoot.json");
+                if (File.Exists(legacyPreferred))
+                {
+                    return legacyPreferred;
                 }
             }
 
             string[] bases =
             {
+                Path.Combine("SPT_Runtime", "SPT_Data"),
                 "SPT_Data",
                 Path.Combine("SPT_Data", "Server"),
                 "Aki_Data",
@@ -249,7 +260,7 @@ namespace ULE.SpawnEditor
 
         private static string ServerModRoot()
         {
-            var dir = Path.Combine(BepInEx.Paths.GameRootPath, "SPT", "user", "mods", ModConstants.ModFolderName);
+            var dir = Path.Combine(BepInEx.Paths.GameRootPath, "SPT_Runtime", "user", "mods", ModConstants.ModFolderName);
             Directory.CreateDirectory(dir);
             return dir;
         }
@@ -272,4 +283,3 @@ namespace ULE.SpawnEditor
     }
 }
 #endregion
-

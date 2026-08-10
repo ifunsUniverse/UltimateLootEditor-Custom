@@ -1,12 +1,12 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>Ultimate Loot Editor</AssemblyName>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <OutputPath>$(GameRoot)SPT\user\mods\Ultimate Loot Editor\</OutputPath>
+    <OutputPath>$(GameRoot)SPT_Runtime\user\mods\Ultimate Loot Editor\</OutputPath>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
+    <Nullable>annotations</Nullable>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
     <GenerateDependencyFile>false</GenerateDependencyFile>
@@ -20,27 +20,27 @@
 
   <ItemGroup>
     <Reference Include="0Harmony">
-      <HintPath>$(GameRoot)SPT\0Harmony.dll</HintPath>
+      <HintPath>$(GameRoot)SPT_Runtime\0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="SemanticVersioning">
-      <HintPath>$(GameRoot)SPT\SemanticVersioning.dll</HintPath>
+      <HintPath>$(GameRoot)SPT_Runtime\SemanticVersioning.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="SPTarkov.Common">
-      <HintPath>$(GameRoot)SPT\SPTarkov.Common.dll</HintPath>
+      <HintPath>$(GameRoot)SPT_Runtime\SPTarkov.Common.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="SPTarkov.DI">
-      <HintPath>$(GameRoot)SPT\SPTarkov.DI.dll</HintPath>
+      <HintPath>$(GameRoot)SPT_Runtime\SPTarkov.DI.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="SPTarkov.Reflection">
-      <HintPath>$(GameRoot)SPT\SPTarkov.Reflection.dll</HintPath>
+      <HintPath>$(GameRoot)SPT_Runtime\SPTarkov.Reflection.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="SPTarkov.Server.Core">
-      <HintPath>$(GameRoot)SPT\SPTarkov.Server.Core.dll</HintPath>
+      <HintPath>$(GameRoot)SPT_Runtime\SPTarkov.Server.Core.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

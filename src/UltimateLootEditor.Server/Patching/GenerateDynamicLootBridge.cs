@@ -13,7 +13,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using HarmonyLib;
-using SPTarkov.Server.Core.Generators;                  // LocationLootGenerator
+using SPTarkov.Server.Core.Generators.Loot;             // LocationLootGenerator, ContainerItem
 using SPTarkov.Server.Core.Models.Eft.Common;           // Spawnpoint
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;    // LooseLoot
 using UltimateLootEditor.Shared;
@@ -25,6 +25,9 @@ namespace UltimateLootEditor.Patching
     [HarmonyPatch]
     public static class GenerateDynamicLootBridge
     {
+        private static readonly Random ForcedSpawnRootRandom = new();
+        private static readonly object ForcedSpawnRootRandomLock = new();
+
         [HarmonyPrefix]
         [HarmonyPatch(typeof(LocationLootGenerator), nameof(LocationLootGenerator.GenerateDynamicLoot))]
         public static bool Prefix(
@@ -70,6 +73,8 @@ namespace UltimateLootEditor.Patching
                 Index(dynamicLootDist.Spawnpoints);
                 Index(dynamicLootDist.SpawnpointsForced);
 
+                var created = EnsureCreatedSpawnpoints(dynamicLootDist, idx, dynByLabel, dynByGuid);
+                var forcedSpawnpoints = new HashSet<Spawnpoint>(dynamicLootDist.SpawnpointsForced ?? Enumerable.Empty<Spawnpoint>());
                 int touched = 0, wrote = 0, replaced = 0, notFound = 0, noDist = 0, skippedMissing = 0;
                 var processedSpawnIds = new HashSet<string>(StringComparer.Ordinal);
 
@@ -114,6 +119,8 @@ namespace UltimateLootEditor.Patching
                     }
 
                     ApplySpawnChance(sp, template, ov);
+                    ApplySpawnTransform(sp, template, ov);
+                    PrepareForcedOrAlwaysSpawnWeightedRoot(sp, template, forcedSpawnpoints.Contains(sp));
                 }
 
                 // Also check any overrides keyed by GUID only
@@ -151,9 +158,11 @@ namespace UltimateLootEditor.Patching
                     }
 
                     ApplySpawnChance(sp, template, ov);
+                    ApplySpawnTransform(sp, template, ov);
+                    PrepareForcedOrAlwaysSpawnWeightedRoot(sp, template, forcedSpawnpoints.Contains(sp));
                 }
 
-                Logger.Info($"[ULE] map={locId} touched={touched} wrote={wrote} notFound={notFound} replaced={replaced} noDist={noDist} skippedMissing={skippedMissing}");
+                Logger.Info($"[ULE] map={locId} touched={touched} wrote={wrote} created={created} notFound={notFound} replaced={replaced} noDist={noDist} skippedMissing={skippedMissing}");
                 return true;
             }
             catch (Exception ex)
@@ -161,6 +170,101 @@ namespace UltimateLootEditor.Patching
                 Logger.Error($"[ULE] Override apply failed for '{locId}', falling back to vanilla loot generation", ex);
                 return true;
             }
+        }
+
+        private static int EnsureCreatedSpawnpoints(
+            LooseLoot dynamicLootDist,
+            UleActiveIndex idx,
+            IDictionary<string, Spawnpoint> dynByLabel,
+            IDictionary<string, Spawnpoint> dynByGuid)
+        {
+            if (dynamicLootDist == null || idx?.ByFullLabel == null)
+            {
+                return 0;
+            }
+
+            var created = 0;
+            foreach (var pair in idx.ByFullLabel)
+            {
+                var label = pair.Key;
+                var ov = pair.Value;
+                if (string.IsNullOrWhiteSpace(label) || ov?.IsCreated != true)
+                {
+                    continue;
+                }
+
+                if (dynByLabel.ContainsKey(label))
+                {
+                    continue;
+                }
+
+                if (ov.Position == null)
+                {
+                    Logger.Warn($"[ULE] Created spawn '{label}' has no saved position and was skipped.");
+                    continue;
+                }
+
+                var position = ToServerVector(ov.Position);
+                var rotation = ov.Rotation != null
+                    ? ToServerVector(ov.Rotation)
+                    : new SPTarkov.Server.Core.Models.Eft.Common.Vector3(0f, 0f, 0f);
+
+                var spawn = new Spawnpoint
+                {
+                    LocationId = label,
+                    Probability = Clamp01(ov.SpawnChance),
+                    ItemDistribution = new List<LooseLootItemDistribution>(),
+                    Template = new SpawnpointTemplate
+                    {
+                        Id = label,
+                        IsContainer = false,
+                        UseGravity = ov.UseGravity ?? true,
+                        RandomRotation = false,
+                        Position = position,
+                        Rotation = rotation,
+                        IsAlwaysSpawn = ov.IsAlwaysSpawn ?? ov.SpawnChance >= 0.999d,
+                        IsGroupPosition = false,
+                        GroupPositions = new List<GroupPosition>(),
+                        Root = string.Empty,
+                        Items = new List<SptLootItem>()
+                    }
+                };
+
+                if (!AddToSpawnpointList(dynamicLootDist, "Spawnpoints", spawn))
+                {
+                    Logger.Warn($"[ULE] Created spawn '{label}' could not be added to the loose loot table.");
+                    continue;
+                }
+
+                dynByLabel[label] = spawn;
+                var guid = LabelGuidExtractor.ExtractGuid(label);
+                if (!string.IsNullOrWhiteSpace(guid))
+                {
+                    dynByGuid[guid] = spawn;
+                }
+
+                created++;
+            }
+
+            return created;
+        }
+
+        private static SPTarkov.Server.Core.Models.Eft.Common.Vector3 ToServerVector(UleVector3 value)
+        {
+            return new SPTarkov.Server.Core.Models.Eft.Common.Vector3(
+                Convert.ToSingle(value?.X ?? 0d),
+                Convert.ToSingle(value?.Y ?? 0d),
+                Convert.ToSingle(value?.Z ?? 0d));
+        }
+
+        private static double Clamp01(double value)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+            {
+                return 0d;
+            }
+
+            return Math.Max(0d, Math.Min(1d, value));
         }
 
         public static void PostfixCreateDynamicLootItem(
@@ -446,6 +550,157 @@ namespace UltimateLootEditor.Patching
             return list.Count > 0;
         }
 
+        private static void PrepareForcedOrAlwaysSpawnWeightedRoot(Spawnpoint sp, object template, bool isForcedSpawn)
+        {
+            if (sp?.Template == null || template == null)
+            {
+                return;
+            }
+
+            if (!isForcedSpawn && sp.Template.IsAlwaysSpawn != true)
+            {
+                return;
+            }
+
+            if (!TryReadDistributionWeights(sp, template, out var weightedKeys) || weightedKeys.Count <= 1)
+            {
+                return;
+            }
+
+            var chosenComposedKey = ChooseWeightedComposedKey(weightedKeys);
+            if (string.IsNullOrWhiteSpace(chosenComposedKey))
+            {
+                return;
+            }
+
+            if (!TryGetEnumerableMember(template, new[] { "Items", "items" }, out var itemsMember, out var elemType))
+            {
+                return;
+            }
+
+            var items = (GetMemberValue(template, itemsMember) as IEnumerable)?
+                .Cast<object>()
+                .Where(item => item != null)
+                .ToList();
+            if (items == null || items.Count <= 1)
+            {
+                return;
+            }
+
+            var chosenRoot = items.FirstOrDefault(item =>
+                string.Equals(ReadCkFromElem(item), chosenComposedKey, StringComparison.Ordinal));
+            if (chosenRoot == null)
+            {
+                return;
+            }
+
+            var reordered = new List<object> { chosenRoot };
+            reordered.AddRange(items.Where(item => !ReferenceEquals(item, chosenRoot)));
+            if (!TryAssignItemsBack(template, itemsMember, elemType, reordered))
+            {
+                return;
+            }
+
+            var rootId = ReadMemberAsString(chosenRoot, "Id");
+            if (!string.IsNullOrWhiteSpace(rootId) &&
+                !TrySetMongoIdOrString(template, "Root", rootId))
+            {
+                TrySetStringOrBacking(template, "Root", rootId);
+            }
+        }
+
+        private static bool TryReadDistributionWeights(object sp, object template, out List<(string ck, double weight)> weightedKeys)
+        {
+            weightedKeys = new List<(string ck, double weight)>();
+            if (!TryReadDistributionWeightsFromHolder(sp, weightedKeys) && template != null)
+            {
+                TryReadDistributionWeightsFromHolder(template, weightedKeys);
+            }
+
+            weightedKeys = weightedKeys
+                .Where(item => !string.IsNullOrWhiteSpace(item.ck) && item.weight > 0d)
+                .ToList();
+            return weightedKeys.Count > 0;
+        }
+
+        private static bool TryReadDistributionWeightsFromHolder(object holder, List<(string ck, double weight)> weightedKeys)
+        {
+            if (holder == null || weightedKeys == null)
+            {
+                return false;
+            }
+
+            if (!TryFindDistributionMember(holder, out var member, out _, out _))
+            {
+                return false;
+            }
+
+            var list = GetMemberValue(holder, member) as IEnumerable;
+            if (list == null)
+            {
+                return false;
+            }
+
+            foreach (var elem in list)
+            {
+                var ck = ReadCkFromElem(elem);
+                if (string.IsNullOrWhiteSpace(ck))
+                {
+                    continue;
+                }
+
+                weightedKeys.Add((ck, Math.Max(0d, ReadWeightFromDistribution(elem))));
+            }
+
+            return weightedKeys.Count > 0;
+        }
+
+        private static string ChooseWeightedComposedKey(List<(string ck, double weight)> weightedKeys)
+        {
+            if (weightedKeys == null || weightedKeys.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            var total = weightedKeys.Sum(item => Math.Max(0d, item.weight));
+            if (total <= 0d)
+            {
+                return weightedKeys[0].ck;
+            }
+
+            double roll;
+            lock (ForcedSpawnRootRandomLock)
+            {
+                roll = ForcedSpawnRootRandom.NextDouble() * total;
+            }
+
+            var accumulated = 0d;
+            foreach (var (ck, weight) in weightedKeys)
+            {
+                accumulated += Math.Max(0d, weight);
+                if (roll <= accumulated)
+                {
+                    return ck;
+                }
+            }
+
+            return weightedKeys[weightedKeys.Count - 1].ck;
+        }
+
+        private static double ReadWeightFromDistribution(object elem)
+        {
+            var names = new[] { "RelativeProbability", "Probability", "RelativeWeight", "Weight", "Chance" };
+            foreach (var name in names)
+            {
+                if (TryReadNumericMember(elem, name, out var value))
+                {
+                    return value;
+                }
+            }
+
+            return 1d;
+        }
+
         // ==== Fallback: single-element override (spawnpoint-aware) ==============
         private static bool TryWriteFirstItem(Spawnpoint sp, object template, UleSpawnOverride ov, out string msg)
         {
@@ -540,6 +795,7 @@ namespace UltimateLootEditor.Patching
             }
 
             ApplySpawnChance(sp, template, ov);
+            ApplySpawnTransform(sp, template, ov);
             return true;
         }
 
@@ -570,6 +826,141 @@ namespace UltimateLootEditor.Patching
                 }
             }
             catch { }
+        }
+
+        private static void ApplySpawnTransform(Spawnpoint sp, object template, UleSpawnOverride ov)
+        {
+            if (ov == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (ov.Position != null)
+                {
+                    TrySetVectorMember(sp, "Position", ov.Position);
+                    TrySetVectorMember(template, "Position", ov.Position);
+                }
+
+                if (ov.Rotation != null)
+                {
+                    TrySetVectorMember(sp, "Rotation", ov.Rotation);
+                    TrySetVectorMember(template, "Rotation", ov.Rotation);
+                }
+
+                if (ov.UseGravity.HasValue)
+                {
+                    TrySetNullableBoolOrBacking(sp, "UseGravity", ov.UseGravity.Value);
+                    TrySetNullableBoolOrBacking(template, "UseGravity", ov.UseGravity.Value);
+                }
+            }
+            catch { }
+        }
+
+        private static bool TrySetVectorMember(object target, string name, UleVector3 value)
+        {
+            if (target == null || string.IsNullOrWhiteSpace(name) || value == null)
+            {
+                return false;
+            }
+
+            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.IgnoreCase;
+            var property = target.GetType().GetProperty(name, flags);
+            if (property?.CanWrite == true && TryConvertVector(property.PropertyType, value, out var propertyValue))
+            {
+                try
+                {
+                    property.SetValue(target, propertyValue);
+                    return true;
+                }
+                catch { }
+            }
+
+            var field = target.GetType().GetField(name, flags);
+            if (field != null && !field.IsInitOnly && TryConvertVector(field.FieldType, value, out var fieldValue))
+            {
+                try
+                {
+                    field.SetValue(target, fieldValue);
+                    return true;
+                }
+                catch { }
+            }
+
+            var backingField = target.GetType().GetField($"<{name}>k__BackingField", flags);
+            if (backingField != null && !backingField.IsInitOnly && TryConvertVector(backingField.FieldType, value, out var backingValue))
+            {
+                try
+                {
+                    backingField.SetValue(target, backingValue);
+                    return true;
+                }
+                catch { }
+            }
+
+            return false;
+        }
+
+        private static bool TryConvertVector(Type targetType, UleVector3 value, out object converted)
+        {
+            converted = null;
+            if (targetType == null || value == null)
+            {
+                return false;
+            }
+
+            var effectiveType = Nullable.GetUnderlyingType(targetType) ?? targetType;
+            var x = Convert.ToSingle(value.X);
+            var y = Convert.ToSingle(value.Y);
+            var z = Convert.ToSingle(value.Z);
+            var serverVector = new SPTarkov.Server.Core.Models.Eft.Common.Vector3(x, y, z);
+
+            if (effectiveType.IsInstanceOfType(serverVector))
+            {
+                converted = serverVector;
+                return true;
+            }
+
+            foreach (var parameterType in new[] { typeof(float), typeof(double) })
+            {
+                var ctor = effectiveType.GetConstructor(new[] { parameterType, parameterType, parameterType });
+                if (ctor == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    converted = ctor.Invoke(new[]
+                    {
+                        Convert.ChangeType(value.X, parameterType),
+                        Convert.ChangeType(value.Y, parameterType),
+                        Convert.ChangeType(value.Z, parameterType)
+                    });
+                    return true;
+                }
+                catch { }
+            }
+
+            try
+            {
+                converted = Activator.CreateInstance(effectiveType);
+                if (converted == null)
+                {
+                    return false;
+                }
+
+                SetNumericIfExists(converted, new[] { "X", "x" }, x);
+                SetNumericIfExists(converted, new[] { "Y", "y" }, y);
+                SetNumericIfExists(converted, new[] { "Z", "z" }, z);
+                return true;
+            }
+            catch
+            {
+                converted = null;
+                return false;
+            }
         }
 
         private static bool IsMissingTemplate(string tpl)
@@ -725,6 +1116,46 @@ namespace UltimateLootEditor.Patching
             list.Add(sp);
         }
 
+        private static bool AddToSpawnpointList(object dynamicLootDist, string memberName, Spawnpoint sp)
+        {
+            if (dynamicLootDist == null || sp == null || string.IsNullOrWhiteSpace(memberName))
+            {
+                return false;
+            }
+
+            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.IgnoreCase;
+            var member = (MemberInfo)dynamicLootDist.GetType().GetProperty(memberName, flags)
+                         ?? dynamicLootDist.GetType().GetField(memberName, flags);
+            if (member == null)
+            {
+                return false;
+            }
+
+            var existing = GetMemberValue(dynamicLootDist, member) as IEnumerable;
+            var list = new List<Spawnpoint>();
+            if (existing != null)
+            {
+                foreach (var item in existing)
+                {
+                    if (item is Spawnpoint existingSpawn)
+                    {
+                        var existingLabel = existingSpawn.Template?.Id ?? existingSpawn.LocationId ?? string.Empty;
+                        var newLabel = sp.Template?.Id ?? sp.LocationId ?? string.Empty;
+                        if (ReferenceEquals(existingSpawn, sp) ||
+                            string.Equals(existingLabel, newLabel, StringComparison.Ordinal))
+                        {
+                            return true;
+                        }
+
+                        list.Add(existingSpawn);
+                    }
+                }
+            }
+
+            list.Add(sp);
+            return TrySetMemberValue(dynamicLootDist, member, list);
+        }
+
         // Read CK from any element shape
         private static string ReadCkFromElem(object elem)
         {
@@ -853,6 +1284,96 @@ namespace UltimateLootEditor.Patching
             }
             catch { }
             return string.Empty;
+        }
+
+        private static string ReadMemberAsString(object obj, string name)
+        {
+            if (obj == null || string.IsNullOrWhiteSpace(name))
+            {
+                return string.Empty;
+            }
+
+            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.IgnoreCase;
+            foreach (var memberName in new[] { name, $"<{name}>k__BackingField" })
+            {
+                try
+                {
+                    var p = obj.GetType().GetProperty(memberName, flags);
+                    if (p != null && p.CanRead)
+                    {
+                        var value = p.GetValue(obj);
+                        var text = value?.ToString();
+                        if (!string.IsNullOrWhiteSpace(text))
+                        {
+                            return text;
+                        }
+                    }
+
+                    var f = obj.GetType().GetField(memberName, flags);
+                    if (f != null)
+                    {
+                        var value = f.GetValue(obj);
+                        var text = value?.ToString();
+                        if (!string.IsNullOrWhiteSpace(text))
+                        {
+                            return text;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            return string.Empty;
+        }
+
+        private static bool TryReadNumericMember(object obj, string name, out double value)
+        {
+            value = 0d;
+            if (obj == null || string.IsNullOrWhiteSpace(name))
+            {
+                return false;
+            }
+
+            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.IgnoreCase;
+            foreach (var memberName in new[] { name, $"<{name}>k__BackingField" })
+            {
+                try
+                {
+                    var p = obj.GetType().GetProperty(memberName, flags);
+                    if (p != null && p.CanRead && TryConvertToDouble(p.GetValue(obj), out value))
+                    {
+                        return true;
+                    }
+
+                    var f = obj.GetType().GetField(memberName, flags);
+                    if (f != null && TryConvertToDouble(f.GetValue(obj), out value))
+                    {
+                        return true;
+                    }
+                }
+                catch { }
+            }
+
+            return false;
+        }
+
+        private static bool TryConvertToDouble(object raw, out double value)
+        {
+            value = 0d;
+            if (raw == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                value = Convert.ToDouble(raw);
+                return !double.IsNaN(value) && !double.IsInfinity(value);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static bool TrySetStringOrBacking(object target, string name, string value)
@@ -1696,4 +2217,3 @@ namespace UltimateLootEditor.Patching
 
     }
 }
-

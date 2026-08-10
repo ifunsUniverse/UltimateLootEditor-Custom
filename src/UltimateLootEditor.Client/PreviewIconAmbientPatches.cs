@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using EFT.UI;
 using HarmonyLib;
@@ -11,39 +12,63 @@ namespace ULE.SpawnEditor
     {
         private const BindingFlags AnyBinding = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
 
+        private static bool Prepare()
+        {
+            return TargetMethods().Any();
+        }
+
         private static IEnumerable<MethodBase> TargetMethods()
         {
+            var targets = new HashSet<MethodBase>();
             var concreteIconResetOwners = new[]
             {
-                typeof(GClass925).BaseType,
-                typeof(GClass926).BaseType,
-                typeof(GClass927).BaseType
+                typeof(ClothingIconCreator).BaseType,
+                typeof(ItemIconCreator).BaseType,
+                typeof(EFT.PlayerIcons.PlayerIconCreator).BaseType
             };
 
             foreach (var resetOwner in concreteIconResetOwners)
             {
-                var resetMethod = GetResetMethod(resetOwner, "Struct115");
+                var resetMethod = GetResetMethod(resetOwner, "IconRenderSettings", "Struct115");
                 if (resetMethod != null)
                 {
-                    yield return resetMethod;
+                    targets.Add(resetMethod);
                 }
             }
 
-            var cameraImageResetMethod = GetResetMethod(typeof(CameraImage), "Struct1174");
+            var cameraImageResetMethod = GetResetMethod(typeof(CameraImage), "LevelRenderSettings", "Struct1174");
             if (cameraImageResetMethod != null)
             {
-                yield return cameraImageResetMethod;
+                targets.Add(cameraImageResetMethod);
+            }
+
+            foreach (var target in targets)
+            {
+                yield return target;
             }
         }
 
-        private static MethodBase GetResetMethod(Type resetOwner, string nestedTypeName)
+        private static MethodBase GetResetMethod(Type resetOwner, params string[] nestedTypeNames)
         {
             if (resetOwner == null)
             {
                 return null;
             }
 
-            var nestedType = resetOwner.GetNestedType(nestedTypeName, AnyBinding);
+            Type nestedType = null;
+            foreach (var nestedTypeName in nestedTypeNames ?? Array.Empty<string>())
+            {
+                nestedType = resetOwner.GetNestedType(nestedTypeName, AnyBinding);
+                if (nestedType != null)
+                {
+                    break;
+                }
+            }
+
+            nestedType ??= resetOwner
+                .GetNestedTypes(AnyBinding)
+                .FirstOrDefault(type => type.GetMethod("Reset", AnyBinding, null, Type.EmptyTypes, null) != null);
+
             if (nestedType == null)
             {
                 return null;
@@ -66,7 +91,7 @@ namespace ULE.SpawnEditor
                 return null;
             }
 
-            return nestedType.GetMethod("Reset", AnyBinding);
+            return nestedType.GetMethod("Reset", AnyBinding, null, Type.EmptyTypes, null);
         }
 
         private static bool Prefix()

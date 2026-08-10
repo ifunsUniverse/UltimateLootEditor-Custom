@@ -41,7 +41,7 @@ namespace ULE.SpawnEditor
         private static bool SuppressCameraBackedEditBuildBackdrops => true;
         private static bool SuppressBattleCameraSupersamplingDuringPreview => false;
         private static bool StabilizeBattleCameraTransformDuringPreview => true;
-        private static bool EnableAsyncEditBuildPreviewSetup => false;
+        private static bool EnableAsyncEditBuildPreviewSetup => true;
         private const float PreviewLightFreeColorBoost = 1.35f;
         private const float PreviewLightFreeEmissionBoost = 0.18f;
         private static readonly Color PreviewLightFreeAmbientFill = new Color(1.45f, 1.45f, 1.45f, 1f);
@@ -53,9 +53,9 @@ namespace ULE.SpawnEditor
         private const string CompoundItemTypeName = "EFT.InventoryLogic.CompoundItem, Assembly-CSharp";
         private const string InventoryControllerTypeName = "EFT.InventoryLogic.InventoryController, Assembly-CSharp";
         private const string MongoIdTypeName = "EFT.MongoID, Assembly-CSharp";
-        private const string ItemFactoryTypeName = "ItemFactoryClass, Assembly-CSharp";
-        private const string FlatItemsDataTypeName = "FlatItemsDataClass, Assembly-CSharp";
-        private const string GClass846TypeName = "GClass846, Assembly-CSharp";
+        private const string ItemFactoryTypeName = "EFT.ItemFactory, Assembly-CSharp";
+        private const string FlatItemsDataTypeName = "JsonType.FlatItem, Assembly-CSharp";
+        private const string UnparsedDataTypeName = "UnparsedData, Assembly-CSharp";
         private const string UtilityApplicationTypeName = "UtilityApplication, Assembly-CSharp";
         private const string CanvasTypeName = "UnityEngine.Canvas, UnityEngine.UIModule";
         private static readonly char[] HexAlphabet = "0123456789abcdef".ToCharArray();
@@ -108,22 +108,23 @@ namespace ULE.SpawnEditor
         private static Type _mongoIdType;
         private static Type _itemFactoryType;
         private static Type _flatItemsDataType;
-        private static Type _gclass846Type;
+        private static Type _unparsedDataType;
         private static Type _utilityApplicationType;
         private static Type _canvasType;
         private static ConstructorInfo _mongoIdCtor;
         private static ConstructorInfo _flatItemsDataCtor;
-        private static ConstructorInfo _gclass846Ctor;
+        private static ConstructorInfo _unparsedDataConstructor;
         private static FieldInfo _flatIdField;
         private static FieldInfo _flatTplField;
         private static FieldInfo _flatParentIdField;
         private static FieldInfo _flatSlotIdField;
         private static FieldInfo _flatLocationField;
         private static FieldInfo _flatUpdField;
-        private static FieldInfo _gclass846TokenField;
+        private static FieldInfo _unparsedDataTokenField;
         private static FieldInfo _utilityItemFactoryField;
         private static PropertyInfo _singletonInstanceProperty;
         private static MethodInfo _flatItemsToTreeMethod;
+        private static string _reflectionLookupError;
 
         private static RaidEditBuildController _activeController;
         private static BepInEx.Logging.ManualLogSource _log;
@@ -152,7 +153,7 @@ namespace ULE.SpawnEditor
         private static bool _delayedPreviewDiagnosticsLogged;
         private static bool _battleCameraComponentDiagnosticsLogged;
         private static EditOpenTimingSession _editOpenTiming;
-        private static GInterface495<EEftScreenType> _previewPreviousScreenController;
+        private static EFT.UI.Screens.IBaseScreenController<EEftScreenType> _previewPreviousScreenController;
         private static bool _battleScreenContextRestored;
         private static bool _previewTransitionActive;
         private static readonly List<Light> CapturedEnabledSceneLights = new List<Light>(512);
@@ -260,13 +261,13 @@ namespace ULE.SpawnEditor
         private static LootItem _previewSourceItem;
         private static LootItem _previewOriginalItem;
         private static CompoundItem _openingPreviewItem;
-        private static ISession _openingPreviewSession;
+        private static EFT.IEftSession _openingPreviewSession;
         private static bool _previewApplyOnClose;
         private static bool _previewEditableManipulationInstalled;
         private static bool _previewEditBuildActionsRestricted;
         private static float _runtimeAttachmentPoolInstallAt;
-        private static TraderControllerClass _cachedEditBuildTraderController;
-        private static ItemFactoryClass _cachedItemFactory;
+        private static EFT.InventoryLogic.ItemController _cachedEditBuildTraderController;
+        private static EFT.ItemFactory _cachedItemFactory;
         private static int _cachedArmorPlateTemplateSourceCount = -1;
         private static string[] _cachedArmorPlateTemplateIds = Array.Empty<string>();
         private static bool _lastPreviewAppliedChanges;
@@ -436,7 +437,7 @@ namespace ULE.SpawnEditor
             {
                 if (EnsureReflection(null, out _) &&
                     TryResolveItemFactory(out var itemFactoryObject, out _) &&
-                    itemFactoryObject is ItemFactoryClass itemFactory)
+                    itemFactoryObject is EFT.ItemFactory itemFactory)
                 {
                     var item = itemFactory.CreateItem(GenerateMongoId(), tpl, null);
                     supported = IsSupportedEditableRootItem(item) &&
@@ -466,17 +467,17 @@ namespace ULE.SpawnEditor
                 return true;
             }
 
-            if (item is ArmorPlateItemClass)
+            if (item is EFT.InventoryLogic.ArmorPlate)
             {
                 return false;
             }
 
-            if (item is ArmorItemClass || item is HeadwearItemClass)
+            if (item is EFT.InventoryLogic.Armor || item is EFT.InventoryLogic.Headwear)
             {
                 return true;
             }
 
-            return item is VestItemClass && HasEditableArmorComponents(item);
+            return item is EFT.InventoryLogic.Vest && HasEditableArmorComponents(item);
         }
 
         private static bool HasEditableArmorComponents(Item item)
@@ -516,6 +517,88 @@ namespace ULE.SpawnEditor
             }
 
             return true;
+        }
+
+        public static bool CanCreateWorldPreview(LootItem item)
+        {
+            return item != null &&
+                   !string.IsNullOrWhiteSpace(item.Tpl) &&
+                   !LootItemTreeValidator.HasMissingTemplates(item);
+        }
+
+        internal static async Task<WorldPreviewObject> CreateWorldPreviewObjectAsync(LootItem item, BepInEx.Logging.ManualLogSource log)
+        {
+            var description = DescribeLootItem(item);
+            if (!CanCreateWorldPreview(item))
+            {
+                return WorldPreviewObject.Failed($"Cannot preview {description}: one or more templates are missing.");
+            }
+
+            if (!EnsureReflection(log, out var error))
+            {
+                return WorldPreviewObject.Failed($"Cannot preview {description}: {FallbackError(error, "preview bridge reflection setup failed")}");
+            }
+
+            if (!TryBuildRuntimePresetItem(item, log, out var runtimeRoot, out error))
+            {
+                return WorldPreviewObject.Failed($"Cannot preview {description}: {FallbackError(error, "runtime item build failed")}");
+            }
+
+            if (runtimeRoot is not Item runtimeItem)
+            {
+                return WorldPreviewObject.Failed($"Cannot preview {description}: Tarkov did not return a compatible runtime item.");
+            }
+
+            object bundleTokens = null;
+            GameObject prefab = null;
+            try
+            {
+                var tokens = runtimeItem.GetAllBundleTokens();
+                bundleTokens = tokens;
+                await EFT.EasyAssetsExtensions.LoadBundles(tokens);
+
+                var poolManager = Singleton<EFT.ObjectsFactory>.Instance;
+                if (poolManager == null)
+                {
+                    TryReleaseBundleTokens(bundleTokens);
+                    return WorldPreviewObject.Failed($"Cannot preview {description}: Tarkov's loot prefab pool is not ready.");
+                }
+
+                prefab = await poolManager.CreateCleanLootPrefabAsync(runtimeItem, null);
+                if (prefab == null)
+                {
+                    TryReleaseBundleTokens(bundleTokens);
+                    return WorldPreviewObject.Failed($"Cannot preview {description}: Tarkov returned an empty item preview object.");
+                }
+
+                prefab.SetActive(false);
+                return WorldPreviewObject.Success(prefab, bundleTokens);
+            }
+            catch (Exception ex)
+            {
+                TryReleaseBundleTokens(bundleTokens);
+                ReturnPreviewPrefab(prefab);
+                var unwrapped = Unwrap(ex);
+                return WorldPreviewObject.Failed($"Cannot preview {description}: prefab creation failed ({unwrapped.GetType().Name}: {unwrapped.Message}).");
+            }
+        }
+
+        private static string DescribeLootItem(LootItem item)
+        {
+            if (item == null)
+            {
+                return "item <null>";
+            }
+
+            var name = !string.IsNullOrWhiteSpace(item.PresetName)
+                ? item.PresetName
+                : "item";
+            return $"{name} [{item.Tpl ?? "<no tpl>"}]";
+        }
+
+        private static string FallbackError(string error, string fallback)
+        {
+            return string.IsNullOrWhiteSpace(error) ? fallback : error;
         }
 
         internal static bool TrySetupAsyncWeaponPreview(
@@ -728,9 +811,7 @@ namespace ULE.SpawnEditor
 
             try
             {
-                typeof(EditBuildScreen)
-                    .GetField("traderControllerClass", AnyBinding)?
-                    .SetValue(screen, _cachedEditBuildTraderController);
+                SetFieldValue(screen, "_allItemsFakeController", _cachedEditBuildTraderController);
             }
             catch
             {
@@ -747,9 +828,7 @@ namespace ULE.SpawnEditor
 
             try
             {
-                _cachedEditBuildTraderController = typeof(EditBuildScreen)
-                    .GetField("traderControllerClass", AnyBinding)?
-                    .GetValue(screen) as TraderControllerClass;
+                _cachedEditBuildTraderController = GetFieldValue(screen, "_allItemsFakeController") as EFT.InventoryLogic.ItemController;
             }
             catch
             {
@@ -1008,14 +1087,14 @@ namespace ULE.SpawnEditor
             }
         }
 
-        private static bool TryResolveBackendSession(out ISession session, out string error)
+        private static bool TryResolveBackendSession(out EFT.IEftSession session, out string error)
         {
             session = null;
             error = null;
 
             try
             {
-                session = Singleton<ClientApplication<ISession>>.Instance?.GetClientBackEndSession();
+                session = Singleton<ClientApplication<EFT.IEftSession>>.Instance?.GetClientBackEndSession();
             }
             catch (Exception ex)
             {
@@ -1126,7 +1205,7 @@ namespace ULE.SpawnEditor
                 {
                     CaptureTerrainMaterialPropertiesBeforePreview();
                 }
-                _previewPreviousScreenController = CurrentScreenSingletonClass.Instance?.CurrentBaseScreenController;
+                _previewPreviousScreenController = EFT.UI.Screens.EftScreenManager.Instance?.CurrentBaseScreenController;
                 _battleScreenContextRestored = false;
                 _previewTransitionActive = true;
                 _previewSourceItem = applyOnClose ? item : null;
@@ -1328,19 +1407,22 @@ namespace ULE.SpawnEditor
                     return;
                 }
 
-                var previousItem = GetFieldValue(preview, "item_0") as Item;
+                var previousItem = GetFieldValue(preview, "_currentItem") as Item;
                 if (!ReferenceEquals(previousItem, item))
                 {
                     preview.ResetRotator(-1f);
                 }
 
-                SetFieldValue(preview, "nullable_1", initialRotation);
-                SetFieldValue(preview, "item_0", item);
-                preview.method_10();
+                SetFieldValue(preview, "_initialRotation", initialRotation);
+                SetFieldValue(preview, "_currentItem", item);
+                if (preview.Rotator == null)
+                {
+                    TryInvokeParameterless(preview, "CreateRotator");
+                }
 
                 if (enableWeaponLights && item is Weapon weapon)
                 {
-                    var trackedLights = GetFieldValue(preview, "list_0") as IList;
+                    var trackedLights = GetFieldValue(preview, "_enabledLightMods") as IList;
                     trackedLights?.Clear();
                     foreach (var lightComponent in weapon.Mods.GetComponents<LightComponent>())
                     {
@@ -1358,7 +1440,7 @@ namespace ULE.SpawnEditor
 
                 var tokens = item.GetAllBundleTokens();
                 bundleTokens = tokens;
-                await GClass1857.LoadBundles(tokens);
+                await EFT.EasyAssetsExtensions.LoadBundles(tokens);
 
                 if (!IsCurrentAsyncPreviewSetup(preview, version))
                 {
@@ -1366,18 +1448,18 @@ namespace ULE.SpawnEditor
                     return;
                 }
 
-                preview.method_4();
-                var previousTokens = GetFieldValue(preview, "gclass1661_0");
-                SetFieldValue(preview, "gclass1661_1", previousTokens);
-                SetFieldValue(preview, "gclass1661_0", bundleTokens);
+                TryInvokeParameterless(preview, "ReleasePreviousTokensIfNeeded");
+                var previousTokens = GetFieldValue(preview, "_objectTokens");
+                SetFieldValue(preview, "_previousTokens", previousTokens);
+                SetFieldValue(preview, "_objectTokens", bundleTokens);
                 bundleTokens = null;
 
                 onLoadingFinished?.Invoke();
 
-                preview.method_4();
-                preview.method_7();
+                TryInvokeParameterless(preview, "ReleasePreviousTokensIfNeeded");
+                TryInvokeParameterless(preview, "DestroyOriginalObject");
 
-                prefab = await Singleton<PoolManagerClass>.Instance.CreateCleanLootPrefabAsync(item, null);
+                prefab = await Singleton<EFT.ObjectsFactory>.Instance.CreateCleanLootPrefabAsync(item, null);
 
                 if (!IsCurrentAsyncPreviewSetup(preview, version))
                 {
@@ -1390,12 +1472,12 @@ namespace ULE.SpawnEditor
                     throw new InvalidOperationException("Tarkov returned a null preview prefab.");
                 }
 
-                SetFieldValue(preview, "gameObject_0", prefab);
+                SetFieldValue(preview, "_originalObject", prefab);
                 prefab.SetActive(true);
-                preview.method_5(prefab, initialRotation);
-                preview.method_9();
+                TryInvoke(preview, "PositionGameObject", prefab, initialRotation);
+                TryInvokeParameterless(preview, "SetPreviewMaskToChildrenLights");
 
-                var positionedObject = GetFieldValue(preview, "transform_1") as Transform;
+                var positionedObject = GetFieldValue(preview, "_positionedObject") as Transform;
                 if (positionedObject == null)
                 {
                     throw new InvalidOperationException("Tarkov preview positioned object was not created.");
@@ -1403,17 +1485,17 @@ namespace ULE.SpawnEditor
 
                 positionedObject.SetParent(preview.Rotator, false);
                 var bounds = WeaponPreview.GetBounds(positionedObject.gameObject);
-                SetFieldValue(preview, "nullable_0", new Bounds?(bounds));
+                SetFieldValue(preview, "_originalBounds", new Bounds?(bounds));
                 preview.enabled = true;
 
-                TransformHelperClass.SetLayersRecursively(prefab, LayerMaskClass.WeaponPreview);
+                TransformTools.SetLayersRecursively(prefab, LayersMaskController.WeaponPreview);
 
                 if (setAsClosest)
                 {
                     preview.WeaponPreviewCamera.PlaceInClosestPosition(
                         bounds,
                         item.TemplateId,
-                        new GStruct55<float>
+                        new ClampValue<float>
                         {
                             Min = -2.7f,
                             Max = -0.45f
@@ -1470,6 +1552,37 @@ namespace ULE.SpawnEditor
                 {
                     // Ignore cleanup errors while cancelling async preview setup.
                 }
+            }
+        }
+
+        internal sealed class WorldPreviewObject
+        {
+            private WorldPreviewObject(GameObject prefab, object bundleTokens, string error)
+            {
+                Prefab = prefab;
+                BundleTokens = bundleTokens;
+                Error = error;
+            }
+
+            public GameObject Prefab { get; }
+            public object BundleTokens { get; }
+            public string Error { get; }
+            public bool Succeeded => Prefab != null;
+
+            public static WorldPreviewObject Success(GameObject prefab, object bundleTokens)
+            {
+                return new WorldPreviewObject(prefab, bundleTokens, null);
+            }
+
+            public static WorldPreviewObject Failed(string error)
+            {
+                return new WorldPreviewObject(null, null, string.IsNullOrWhiteSpace(error) ? "Failed to create item preview." : error);
+            }
+
+            public void Release()
+            {
+                ReturnPreviewPrefab(Prefab);
+                TryReleaseBundleTokens(BundleTokens);
             }
         }
 
@@ -1619,16 +1732,14 @@ namespace ULE.SpawnEditor
                 return true;
             }
 
-            var existingManipulation = typeof(EditBuildScreen)
-                .GetField("gclass3468_0", AnyBinding)?
-                .GetValue(screen) as GClass3468;
+            var existingManipulation = GetFieldValue(screen, "_useAllManipulation") as EFT.InventoryLogic.EditBuildManipulation;
             if (existingManipulation == null)
             {
                 return false;
             }
 
             if (!TryResolveItemFactory(out var itemFactoryObject, out var error) ||
-                itemFactoryObject is not ItemFactoryClass itemFactory)
+                itemFactoryObject is not EFT.ItemFactory itemFactory)
             {
                 _log?.LogWarning($"[ULE] Failed to build runtime attachment pool: {error}");
                 return true;
@@ -1648,7 +1759,7 @@ namespace ULE.SpawnEditor
             }
 
             var virtualStash = itemFactory.CreateFakeStash(null);
-            virtualStash.Grids[0] = new GClass3115(Guid.NewGuid().ToString(), Math.Max(30, candidates.Length), 1, true, Array.Empty<ItemFilter>(), virtualStash);
+            virtualStash.Grids[0] = new EFT.InventoryLogic.CornucopiaGrid(Guid.NewGuid().ToString(), Math.Max(30, candidates.Length), 1, true, Array.Empty<ItemFilter>(), virtualStash);
 
             var added = 0;
             var failed = 0;
@@ -1664,17 +1775,17 @@ namespace ULE.SpawnEditor
                 }
             }
 
-            var collections = (existingManipulation.CompoundItem_0 ?? Array.Empty<CompoundItem>())
+            var collections = (existingManipulation.Collections ?? Array.Empty<CompoundItem>())
                 .Where(collection => collection != null)
                 .Concat(new CompoundItem[] { virtualStash })
                 .ToArray();
-            var manipulationController = existingManipulation.InventoryController_0 ??
+            var manipulationController = existingManipulation.InventoryController ??
                                          new InventoryController(_activeController.Session.Profile, true);
             var manipulation = new UleRuntimeAttachmentManipulation(
                 manipulationController,
                 collections,
                 _log,
-                CountRuntimeCollectionItems(existingManipulation.CompoundItem_0),
+                CountRuntimeCollectionItems(existingManipulation.Collections),
                 armorPlateCount,
                 slotCandidateCount,
                 added,
@@ -1685,7 +1796,7 @@ namespace ULE.SpawnEditor
             return true;
         }
 
-        internal static bool TryCreateFastEditBuildManipulation(EditBuildScreen screen, out GClass3467 manipulation)
+        internal static bool TryCreateFastEditBuildManipulation(EditBuildScreen screen, out EFT.InventoryLogic.DropdownManipulation manipulation)
         {
             manipulation = null;
             if (!IsPreviewTransitionActiveOrOpen || screen == null)
@@ -1695,15 +1806,15 @@ namespace ULE.SpawnEditor
 
             try
             {
-                var session = _openingPreviewSession ?? _activeController?.Session ?? GetFieldValue(screen, "iSession") as ISession;
-                var profile = session?.Profile ?? GetFieldValue(screen, "profile_0") as Profile;
+                var session = _openingPreviewSession ?? _activeController?.Session ?? GetFieldValue(screen, "_session") as EFT.IEftSession;
+                var profile = session?.Profile ?? GetFieldValue(screen, "_profile") as Profile;
                 if (session == null || profile == null)
                 {
                     return false;
                 }
 
                 if (!TryResolveItemFactory(out var itemFactoryObject, out _) ||
-                    itemFactoryObject is not ItemFactoryClass itemFactory)
+                    itemFactoryObject is not EFT.ItemFactory itemFactory)
                 {
                     return false;
                 }
@@ -1711,7 +1822,7 @@ namespace ULE.SpawnEditor
                 var traderController = _cachedEditBuildTraderController;
                 if (traderController == null || traderController.RootItem is not CompoundItem)
                 {
-                    traderController = screen.method_29(itemFactory.CreateAllModsEver());
+                    traderController = screen.CreateFakeController(itemFactory.CreateAllModsEver());
                     if (traderController == null || traderController.RootItem is not CompoundItem)
                     {
                         return false;
@@ -1720,9 +1831,13 @@ namespace ULE.SpawnEditor
                     _cachedEditBuildTraderController = traderController;
                 }
 
-                typeof(EditBuildScreen)
-                    .GetField("traderControllerClass", AnyBinding)?
-                    .SetValue(screen, traderController);
+                SetFieldValue(screen, "_allItemsFakeController", traderController);
+
+                var screenInventoryController = screen.InventoryController ?? _activeController?.InventoryController;
+                var playerItems = screenInventoryController?.Inventory?
+                    .GetPlayerItems(EPlayerItems.Stash)?
+                    .ToList() ?? new List<Item>();
+                SetFieldValue(screen, "_playerItems", playerItems);
 
                 var collections = new List<CompoundItem>
                 {
@@ -1758,9 +1873,8 @@ namespace ULE.SpawnEditor
                     added,
                     failed);
 
-                typeof(EditBuildScreen).GetField("gclass3468_0", AnyBinding)?.SetValue(screen, manipulation);
-                typeof(EditBuildScreen).GetField("gclass3467_1", AnyBinding)?.SetValue(screen, manipulation);
-                typeof(EditBuildScreen).GetField("list_1", AnyBinding)?.SetValue(screen, new List<Item>());
+                SetFieldValue(screen, "_useAllManipulation", manipulation);
+                SetFieldValue(screen, "_useAvailableManipulation", manipulation);
 
                 _previewEditableManipulationInstalled = true;
                 return true;
@@ -1794,7 +1908,7 @@ namespace ULE.SpawnEditor
         }
 
         private static IEnumerable<Item> BuildRuntimeAttachmentCandidates(
-            ItemFactoryClass itemFactory,
+            EFT.ItemFactory itemFactory,
             Item activeItem,
             out int armorPlateCount,
             out int slotCandidateCount)
@@ -1835,7 +1949,7 @@ namespace ULE.SpawnEditor
             return results;
         }
 
-        private static bool TryCreateRuntimeAttachmentCandidate(ItemFactoryClass itemFactory, string templateId, out Item item)
+        private static bool TryCreateRuntimeAttachmentCandidate(EFT.ItemFactory itemFactory, string templateId, out Item item)
         {
             item = null;
             if (itemFactory == null || string.IsNullOrWhiteSpace(templateId))
@@ -1845,7 +1959,7 @@ namespace ULE.SpawnEditor
 
             try
             {
-                item = itemFactory.CreateItem(itemFactory.MongoID_0, templateId, null);
+                item = itemFactory.CreateItem(itemFactory.NextId, templateId, null);
                 return item != null;
             }
             catch (Exception ex)
@@ -1856,7 +1970,7 @@ namespace ULE.SpawnEditor
         }
 
         private static bool TryCreateRuntimeAttachmentCollection(
-            ItemFactoryClass itemFactory,
+            EFT.ItemFactory itemFactory,
             Item activeItem,
             out CompoundItem collection,
             out int armorPlateCount,
@@ -1881,7 +1995,7 @@ namespace ULE.SpawnEditor
             }
 
             var virtualStash = itemFactory.CreateFakeStash(null);
-            virtualStash.Grids[0] = new GClass3115(Guid.NewGuid().ToString(), Math.Max(30, candidates.Length), 1, true, Array.Empty<ItemFilter>(), virtualStash);
+            virtualStash.Grids[0] = new EFT.InventoryLogic.CornucopiaGrid(Guid.NewGuid().ToString(), Math.Max(30, candidates.Length), 1, true, Array.Empty<ItemFilter>(), virtualStash);
 
             foreach (var candidate in candidates)
             {
@@ -1899,7 +2013,7 @@ namespace ULE.SpawnEditor
             return added > 0;
         }
 
-        private static string[] GetRuntimeArmorPlateTemplateIds(ItemFactoryClass itemFactory)
+        private static string[] GetRuntimeArmorPlateTemplateIds(EFT.ItemFactory itemFactory)
         {
             if (itemFactory?.ItemTemplates == null)
             {
@@ -1913,7 +2027,7 @@ namespace ULE.SpawnEditor
             }
 
             _cachedArmorPlateTemplateIds = itemFactory.ItemTemplates
-                .Where(kv => kv.Value is ArmorPlateTemplateClass &&
+                .Where(kv => kv.Value is EFT.InventoryLogic.ArmorPlateTemplate &&
                              !ShouldHideRuntimeAttachmentTemplate(kv.Value, itemFactory.ItemTemplates))
                 .Select(kv => kv.Key.ToString())
                 .Where(tpl => !string.IsNullOrWhiteSpace(tpl))
@@ -1923,7 +2037,7 @@ namespace ULE.SpawnEditor
             return _cachedArmorPlateTemplateIds;
         }
 
-        private static string[] GetRuntimeSlotFilterTemplateIds(ItemFactoryClass itemFactory, Item activeItem)
+        private static string[] GetRuntimeSlotFilterTemplateIds(EFT.ItemFactory itemFactory, Item activeItem)
         {
             if (itemFactory?.ItemTemplates == null || activeItem is not CompoundItem compound || compound.AllSlots == null)
             {
@@ -2093,7 +2207,7 @@ namespace ULE.SpawnEditor
             return item != null && !(item is Weapon);
         }
 
-        private static bool TryAddRuntimeAttachmentCandidate(StashItemClass virtualStash, Item candidate)
+        private static bool TryAddRuntimeAttachmentCandidate(EFT.InventoryLogic.Stash virtualStash, Item candidate)
         {
             if (virtualStash?.Grid == null || candidate == null)
             {
@@ -2238,7 +2352,7 @@ namespace ULE.SpawnEditor
                 return false;
             }
 
-            if (!TryResolveItemFactory(out var itemFactoryObject, out error) || itemFactoryObject is not ItemFactoryClass itemFactory)
+            if (!TryResolveItemFactory(out var itemFactoryObject, out error) || itemFactoryObject is not EFT.ItemFactory itemFactory)
             {
                 error = string.IsNullOrWhiteSpace(error)
                     ? "The Tarkov item factory was not available when the preview closed."
@@ -2246,7 +2360,7 @@ namespace ULE.SpawnEditor
                 return false;
             }
 
-            FlatItemsDataClass[] flatItems;
+            JsonType.FlatItem[] flatItems;
             try
             {
                 flatItems = itemFactory.TreeToFlatItems(runtimeRoot);
@@ -2444,7 +2558,7 @@ namespace ULE.SpawnEditor
                 }
 
                 runtimeRoot = items[rootId];
-                if (runtimeRoot is Item typedRuntimeRoot && itemFactory is ItemFactoryClass typedItemFactory)
+                if (runtimeRoot is Item typedRuntimeRoot && itemFactory is EFT.ItemFactory typedItemFactory)
                 {
                     var addedDefaultInserts = TryMaterializeMissingLockedArmorInserts(typedItemFactory, typedRuntimeRoot);
                     if (addedDefaultInserts > 0)
@@ -2463,7 +2577,7 @@ namespace ULE.SpawnEditor
             }
         }
 
-        private static int TryMaterializeMissingLockedArmorInserts(ItemFactoryClass itemFactory, Item rootItem)
+        private static int TryMaterializeMissingLockedArmorInserts(EFT.ItemFactory itemFactory, Item rootItem)
         {
             if (itemFactory == null || rootItem == null)
             {
@@ -2508,7 +2622,7 @@ namespace ULE.SpawnEditor
                         Item defaultInsert;
                         try
                         {
-                            defaultInsert = itemFactory.CreateItem(itemFactory.MongoID_0, plateTemplateId.ToString(), null);
+                            defaultInsert = itemFactory.CreateItem(itemFactory.NextId, plateTemplateId.ToString(), null);
                         }
                         catch
                         {
@@ -2547,6 +2661,20 @@ namespace ULE.SpawnEditor
                 return true;
             }
 
+            try
+            {
+                if (Singleton<EFT.ItemFactory>.Instantiated)
+                {
+                    itemFactory = Singleton<EFT.ItemFactory>.Instance;
+                    _cachedItemFactory = itemFactory as EFT.ItemFactory;
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                error = $"Failed to resolve singleton item factory: {Unwrap(ex).Message}";
+            }
+
             if (_singletonInstanceProperty != null)
             {
                 try
@@ -2554,7 +2682,7 @@ namespace ULE.SpawnEditor
                     itemFactory = _singletonInstanceProperty.GetValue(null, null);
                     if (itemFactory != null)
                     {
-                        _cachedItemFactory = itemFactory as ItemFactoryClass;
+                        _cachedItemFactory = itemFactory as EFT.ItemFactory;
                         return true;
                     }
                 }
@@ -2571,14 +2699,14 @@ namespace ULE.SpawnEditor
                     var utilityApplications = Resources.FindObjectsOfTypeAll(_utilityApplicationType);
                     foreach (var app in utilityApplications)
                     {
-                    var candidate = _utilityItemFactoryField.GetValue(app);
-                    if (candidate != null)
-                    {
-                        itemFactory = candidate;
-                        _cachedItemFactory = candidate as ItemFactoryClass;
-                        return true;
+                        var candidate = _utilityItemFactoryField.GetValue(app);
+                        if (candidate != null)
+                        {
+                            itemFactory = candidate;
+                            _cachedItemFactory = candidate as EFT.ItemFactory;
+                            return true;
+                        }
                     }
-                }
                 }
                 catch (Exception ex)
                 {
@@ -2653,8 +2781,8 @@ namespace ULE.SpawnEditor
 
             try
             {
-                var wrapper = _gclass846Ctor.Invoke(null);
-                _gclass846TokenField.SetValue(wrapper, JToken.Parse(rawJson));
+                var wrapper = _unparsedDataConstructor.Invoke(null);
+                _unparsedDataTokenField.SetValue(wrapper, JToken.Parse(rawJson));
                 return wrapper;
             }
             catch
@@ -2686,6 +2814,7 @@ namespace ULE.SpawnEditor
             error = null;
             if (_lookupAttempted)
             {
+                error = _reflectionLookupError;
                 return _flatItemsToTreeMethod != null;
             }
 
@@ -2693,26 +2822,28 @@ namespace ULE.SpawnEditor
 
             try
             {
-                _itemType = Type.GetType(ItemTypeName, throwOnError: false);
-                _compoundItemType = Type.GetType(CompoundItemTypeName, throwOnError: false);
-                _inventoryControllerType = Type.GetType(InventoryControllerTypeName, throwOnError: false);
-                _mongoIdType = Type.GetType(MongoIdTypeName, throwOnError: false);
-                _itemFactoryType = Type.GetType(ItemFactoryTypeName, throwOnError: false);
-                _flatItemsDataType = Type.GetType(FlatItemsDataTypeName, throwOnError: false);
-                _gclass846Type = Type.GetType(GClass846TypeName, throwOnError: false);
-                _utilityApplicationType = Type.GetType(UtilityApplicationTypeName, throwOnError: false);
-                _canvasType = Type.GetType(CanvasTypeName, throwOnError: false);
+                _itemType = typeof(Item);
+                _compoundItemType = typeof(CompoundItem);
+                _inventoryControllerType = typeof(InventoryController);
+                _mongoIdType = typeof(MongoID);
+                _itemFactoryType = typeof(EFT.ItemFactory);
+                _flatItemsDataType = typeof(JsonType.FlatItem);
+                _unparsedDataType = typeof(UnparsedData);
+                _utilityApplicationType = ResolvePreviewBridgeType(UtilityApplicationTypeName);
+                _canvasType = typeof(Canvas);
                 _mongoIdCtor = _mongoIdType?.GetConstructor(new[] { typeof(string) });
                 _flatItemsDataCtor = _flatItemsDataType?.GetConstructor(Type.EmptyTypes);
-                _gclass846Ctor = _gclass846Type?.GetConstructor(Type.EmptyTypes);
+                _unparsedDataConstructor = _unparsedDataType?.GetConstructor(Type.EmptyTypes);
                 _flatIdField = _flatItemsDataType?.GetField("_id", AnyBinding);
                 _flatTplField = _flatItemsDataType?.GetField("_tpl", AnyBinding);
                 _flatParentIdField = _flatItemsDataType?.GetField("parentId", AnyBinding);
                 _flatSlotIdField = _flatItemsDataType?.GetField("slotId", AnyBinding);
                 _flatLocationField = _flatItemsDataType?.GetField("location", AnyBinding);
                 _flatUpdField = _flatItemsDataType?.GetField("upd", AnyBinding);
-                _gclass846TokenField = _gclass846Type?.GetField("JToken", AnyBinding);
-                _utilityItemFactoryField = _utilityApplicationType?.GetField("ItemFactory", AnyBinding);
+                _unparsedDataTokenField = _unparsedDataType?.GetField("JToken", AnyBinding);
+                _utilityItemFactoryField = _utilityApplicationType?.GetField("ItemFactory", AnyBinding) ??
+                                           _utilityApplicationType?.GetField("itemFactory", AnyBinding) ??
+                                           _utilityApplicationType?.GetField("_itemFactory", AnyBinding);
                 var singletonGenericType = Type.GetType("Comfort.Common.Singleton`1, Comfort", throwOnError: false);
                 if (singletonGenericType != null && _itemFactoryType != null)
                 {
@@ -2724,31 +2855,141 @@ namespace ULE.SpawnEditor
 
                 var ready = _mongoIdCtor != null &&
                             _flatItemsDataCtor != null &&
-                            _gclass846Ctor != null &&
+                            _unparsedDataConstructor != null &&
                             _flatIdField != null &&
                             _flatTplField != null &&
                             _flatParentIdField != null &&
                             _flatSlotIdField != null &&
                             _flatLocationField != null &&
                             _flatUpdField != null &&
-                            _gclass846TokenField != null &&
+                            _unparsedDataTokenField != null &&
                             _flatItemsToTreeMethod != null;
 
                 if (!ready)
                 {
-                    error = "Tarkov's preview UI types are not available in this scene.";
+                    error = BuildMissingReflectionMessage();
+                    _reflectionLookupError = error;
                     log?.LogWarning($"[ULE] {error}");
                     return false;
                 }
 
+                _reflectionLookupError = null;
                 return true;
             }
             catch (Exception ex)
             {
                 error = $"Failed to initialize preset preview bridge: {Unwrap(ex).Message}";
+                _reflectionLookupError = error;
                 log?.LogWarning($"[ULE] {error}");
                 return false;
             }
+        }
+
+        private static Type ResolvePreviewBridgeType(params string[] typeNames)
+        {
+            if (typeNames == null)
+            {
+                return null;
+            }
+
+            foreach (var typeName in typeNames)
+            {
+                if (string.IsNullOrWhiteSpace(typeName))
+                {
+                    continue;
+                }
+
+                var type = Type.GetType(typeName, throwOnError: false);
+                if (type != null)
+                {
+                    return type;
+                }
+            }
+
+            return null;
+        }
+
+        private static string BuildMissingReflectionMessage()
+        {
+            var missing = new List<string>();
+            if (_itemType == null)
+            {
+                missing.Add(ItemTypeName);
+            }
+
+            if (_compoundItemType == null)
+            {
+                missing.Add(CompoundItemTypeName);
+            }
+
+            if (_inventoryControllerType == null)
+            {
+                missing.Add(InventoryControllerTypeName);
+            }
+
+            if (_mongoIdCtor == null)
+            {
+                missing.Add("MongoID(string)");
+            }
+
+            if (_itemFactoryType == null)
+            {
+                missing.Add(ItemFactoryTypeName);
+            }
+
+            if (_flatItemsDataCtor == null)
+            {
+                missing.Add(FlatItemsDataTypeName + "()");
+            }
+
+            if (_unparsedDataConstructor == null)
+            {
+                missing.Add(UnparsedDataTypeName + "()");
+            }
+
+            if (_flatIdField == null)
+            {
+                missing.Add("FlatItem._id");
+            }
+
+            if (_flatTplField == null)
+            {
+                missing.Add("FlatItem._tpl");
+            }
+
+            if (_flatParentIdField == null)
+            {
+                missing.Add("FlatItem.parentId");
+            }
+
+            if (_flatSlotIdField == null)
+            {
+                missing.Add("FlatItem.slotId");
+            }
+
+            if (_flatLocationField == null)
+            {
+                missing.Add("FlatItem.location");
+            }
+
+            if (_flatUpdField == null)
+            {
+                missing.Add("FlatItem.upd");
+            }
+
+            if (_unparsedDataTokenField == null)
+            {
+                missing.Add("UnparsedData.JToken");
+            }
+
+            if (_flatItemsToTreeMethod == null)
+            {
+                missing.Add("ItemFactory.FlatItemsToTree");
+            }
+
+            return missing.Count == 0
+                ? "Tarkov's preview UI types are not available in this scene."
+                : "Tarkov's preview UI types are not available. Missing: " + string.Join(", ", missing);
         }
 
         private static Exception Unwrap(Exception ex)
@@ -2889,8 +3130,8 @@ namespace ULE.SpawnEditor
         }
 
         internal static bool TryOverrideCurrentScreenController(
-            GInterface495<EEftScreenType> proposedController,
-            out GInterface495<EEftScreenType> replacement)
+            EFT.UI.Screens.IBaseScreenController<EEftScreenType> proposedController,
+            out EFT.UI.Screens.IBaseScreenController<EEftScreenType> replacement)
         {
             replacement = null;
 
@@ -2914,7 +3155,7 @@ namespace ULE.SpawnEditor
             replacement ??= _previewPreviousScreenController;
             if (replacement == null)
             {
-                var current = CurrentScreenSingletonClass.Instance?.CurrentBaseScreenController;
+                var current = EFT.UI.Screens.EftScreenManager.Instance?.CurrentBaseScreenController;
                 if (current != null && current.ScreenType == EEftScreenType.BattleUI)
                 {
                     replacement = current;
@@ -2933,7 +3174,7 @@ namespace ULE.SpawnEditor
                 {
                     var owner = GamePlayerOwner.MyPlayer != null ? GamePlayerOwner.MyPlayer.GetComponent<GamePlayerOwner>() : null;
                     var battleField = typeof(GamePlayerOwner).GetField("BattleUIScreenController", AnyBinding);
-                    previousController = battleField?.GetValue(owner) as GInterface495<EEftScreenType>;
+                    previousController = battleField?.GetValue(owner) as EFT.UI.Screens.IBaseScreenController<EEftScreenType>;
                 }
                 catch
                 {
@@ -2946,7 +3187,7 @@ namespace ULE.SpawnEditor
                 return;
             }
 
-            var screenManager = CurrentScreenSingletonClass.Instance;
+            var screenManager = EFT.UI.Screens.EftScreenManager.Instance;
             if (screenManager == null)
             {
                 return;
@@ -3089,7 +3330,7 @@ namespace ULE.SpawnEditor
 
             try
             {
-                var screenManager = CurrentScreenSingletonClass.Instance;
+                var screenManager = EFT.UI.Screens.EftScreenManager.Instance;
                 if (screenManager == null)
                 {
                     _postPreviewInventoryToggleStage = 0;
@@ -3139,7 +3380,7 @@ namespace ULE.SpawnEditor
 
             try
             {
-                if (!CurrentScreenSingletonClass.Instance.CheckCurrentScreen(EEftScreenType.BattleUI))
+                if (!EFT.UI.Screens.EftScreenManager.Instance.CheckCurrentScreen(EEftScreenType.BattleUI))
                 {
                     error = "Battle UI is not the active screen.";
                     return false;
@@ -3176,9 +3417,9 @@ namespace ULE.SpawnEditor
                     exitAction,
                     player.HealthController,
                     inventoryController,
-                    player.AbstractQuestControllerClass,
-                    player.AbstractAchievementControllerClass,
-                    player.AbstractPrestigeControllerClass,
+                    player.QuestController,
+                    player.AchievementsController,
+                    player.PrestigeController,
                     null,
                     EInventoryTab.Gear,
                     false
@@ -3200,7 +3441,7 @@ namespace ULE.SpawnEditor
         {
             try
             {
-                var currentController = CurrentScreenSingletonClass.Instance.CurrentBaseScreenController;
+                var currentController = EFT.UI.Screens.EftScreenManager.Instance.CurrentBaseScreenController;
                 if (currentController != null)
                 {
                     var screenType = currentController.ScreenType;
@@ -3321,7 +3562,7 @@ namespace ULE.SpawnEditor
                 }
 
                 TrySetCurrentScreenController(battleController);
-                SnowWetRenderer.smethod_0(EEftScreenType.BattleUI);
+                SnowWetRenderer.OnScreenChanged(EEftScreenType.BattleUI);
                 _battleUiShellApplied = true;
             }
             catch (Exception ex)
@@ -3330,7 +3571,7 @@ namespace ULE.SpawnEditor
             }
         }
 
-        private static GInterface495<EEftScreenType> GetBattleScreenController(GamePlayerOwner owner)
+        private static EFT.UI.Screens.IBaseScreenController<EEftScreenType> GetBattleScreenController(GamePlayerOwner owner)
         {
             if (_previewPreviousScreenController != null &&
                 _previewPreviousScreenController.ScreenType == EEftScreenType.BattleUI)
@@ -3346,7 +3587,7 @@ namespace ULE.SpawnEditor
             try
             {
                 var battleField = typeof(GamePlayerOwner).GetField("BattleUIScreenController", AnyBinding);
-                return battleField?.GetValue(owner) as GInterface495<EEftScreenType>;
+                return battleField?.GetValue(owner) as EFT.UI.Screens.IBaseScreenController<EEftScreenType>;
             }
             catch
             {
@@ -3564,7 +3805,7 @@ namespace ULE.SpawnEditor
 
             try
             {
-                foreach (var light in GClass870.FindUnityObjectsOfType<Light>())
+                foreach (var light in FindObjectsProxy.FindUnityObjectsOfType<Light>())
                 {
                     if (light != null && light.enabled)
                     {
@@ -3611,7 +3852,7 @@ namespace ULE.SpawnEditor
 
             try
             {
-                foreach (var terrain in GClass870.FindUnityObjectsOfType<Terrain>())
+                foreach (var terrain in FindObjectsProxy.FindUnityObjectsOfType<Terrain>())
                 {
                     if (terrain != null)
                     {
@@ -3659,7 +3900,7 @@ namespace ULE.SpawnEditor
 
             try
             {
-                var utilityType = Type.GetType("GClass1257, Assembly-CSharp", throwOnError: false);
+                var utilityType = Type.GetType("GPUInstancer.GPUInstancerAPI, Assembly-CSharp", throwOnError: false);
                 var getManagers = utilityType?.GetMethod("GetActiveManagers", BindingFlags.Public | BindingFlags.Static);
                 var setCamera = utilityType?.GetMethod(
                     "SetCamera",
@@ -3825,7 +4066,7 @@ namespace ULE.SpawnEditor
                 return false;
             }
 
-            if (renderer.gameObject.layer == LayerMaskClass.WeaponPreview)
+            if (renderer.gameObject.layer == LayersMaskController.WeaponPreview)
             {
                 return true;
             }
@@ -4143,7 +4384,7 @@ namespace ULE.SpawnEditor
 
             try
             {
-                var battleCamera = CameraClass.Instance?.Camera;
+                var battleCamera = EFT.CameraControl.CameraManager.Instance?.Camera;
                 if (battleCamera != null)
                 {
                     return battleCamera;
@@ -4372,11 +4613,11 @@ namespace ULE.SpawnEditor
 
             try
             {
-                SnowWetRenderer.smethod_0(EEftScreenType.BattleUI);
+                SnowWetRenderer.OnScreenChanged(EEftScreenType.BattleUI);
                 TryRestoreRainSnowLevelDuringPreview();
                 RestoreCapturedSnowRenderersDuringPreview();
                 TryRebuildSnowCommandBuffersForPreviewOnce();
-                SnowWetRenderer.smethod_1();
+                SnowWetRenderer.OnScreenChanged();
                 WaterRendererv3.DisableSnowMask(false);
                 TryForceTerrainSeasonPresentation();
                 if (_snowGlittersKeywordWasEnabled)
@@ -4601,7 +4842,7 @@ namespace ULE.SpawnEditor
 
             try
             {
-                var controller = Class443.Controller;
+                var controller = Seasons.Controller;
                 if (controller != null)
                 {
                     var season = controller.Season;
@@ -4768,7 +5009,7 @@ namespace ULE.SpawnEditor
             }
 
             return fieldType.GetInterfaces().Any(interfaceType =>
-                string.Equals(interfaceType.Name, "ISession", StringComparison.Ordinal));
+                string.Equals(interfaceType.Name, "EFT.IEftSession", StringComparison.Ordinal));
         }
 
         private static void StartSeasonMaterialsPreviewLoad(string expectedSeasonName)
@@ -4935,7 +5176,7 @@ namespace ULE.SpawnEditor
             ESeasonStatus status;
             try
             {
-                var controller = Class443.Controller;
+                var controller = Seasons.Controller;
                 if (controller == null)
                 {
                     return false;
@@ -5153,7 +5394,7 @@ namespace ULE.SpawnEditor
 
             try
             {
-                var controller = Class443.Controller;
+                var controller = Seasons.Controller;
                 if (controller != null && controller.Status == ESeasonStatus.Summer)
                 {
                     return false;
@@ -5166,15 +5407,15 @@ namespace ULE.SpawnEditor
 
             try
             {
-                // EFT's SnowWetRenderer.method_3 only accepts CameraClass.Instance.Camera.
+                // EFT's SnowWetRenderer.OnPreCullCallback only accepts EFT.CameraControl.CameraManager.Instance.Camera.
                 // During the in-raid modding screen that reference can drift, so run the
                 // same command-buffer work directly for the captured battle camera.
-                var data = Class679.Class679_0.method_0(battleCamera, renderer);
+                var data = SnowRenderer.Instance.GetOrCreateSnowRenderData(battleCamera, renderer);
                 _manualSnowRenderCamera = battleCamera;
                 try
                 {
-                    renderer.method_4(data);
-                    renderer.method_5(data);
+                    renderer.RenderSwamp(data);
+                    renderer.RenderSnowy(data);
                 }
                 finally
                 {
@@ -5217,7 +5458,7 @@ namespace ULE.SpawnEditor
                 WaterRendererv3.DisableSnowMask(_snowMaskWasDisabled);
 
                 RestoreCapturedSnowRendererStates();
-                SnowWetRenderer.smethod_1();
+                SnowWetRenderer.OnScreenChanged();
 
                 if (_snowGlittersKeywordWasEnabled)
                 {
@@ -5247,16 +5488,17 @@ namespace ULE.SpawnEditor
         {
             try
             {
-                var cameraManager = CameraClass.Instance;
-                if (cameraManager?.InventoryBlur_0 == null)
+                var cameraManager = EFT.CameraControl.CameraManager.Instance;
+                var blur = GetFieldValue(cameraManager, "_blur") as Behaviour;
+                if (blur == null)
                 {
                     return;
                 }
 
                 cameraManager.Blur(false, 0f);
-                if (cameraManager.InventoryBlur_0.enabled)
+                if (blur.enabled)
                 {
-                    cameraManager.InventoryBlur_0.enabled = false;
+                    blur.enabled = false;
                 }
             }
             catch
@@ -5652,7 +5894,7 @@ namespace ULE.SpawnEditor
 
             try
             {
-                var cameraManager = CameraClass.Instance;
+                var cameraManager = EFT.CameraControl.CameraManager.Instance;
                 acceptedMain = cameraManager?.Camera != null && ReferenceEquals(camera, cameraManager.Camera);
                 acceptedOptic = cameraManager?.OpticCameraManager?.Camera != null &&
                                 ReferenceEquals(camera, cameraManager.OpticCameraManager.Camera);
@@ -5678,7 +5920,7 @@ namespace ULE.SpawnEditor
 
             try
             {
-                var cameraManager = CameraClass.Instance;
+                var cameraManager = EFT.CameraControl.CameraManager.Instance;
                 if (cameraManager != null && !ReferenceEquals(cameraManager.Camera, battleCamera))
                 {
                     cameraManager.Camera = battleCamera;
@@ -5758,7 +6000,7 @@ namespace ULE.SpawnEditor
                     var rainController = UnityEngine.Object.FindObjectOfType<RainController>();
                     if (rainController != null)
                     {
-                        rainController.method_10(targetWetting);
+                        rainController.SetWetting(targetWetting);
                     }
                     else
                     {
@@ -5771,7 +6013,7 @@ namespace ULE.SpawnEditor
                     var rainController = UnityEngine.Object.FindObjectOfType<RainController>();
                     if (rainController != null)
                     {
-                        rainController.method_13(targetOpaqueness);
+                        rainController.SetOpaqueness(targetOpaqueness);
                     }
                     else
                     {
@@ -5903,18 +6145,18 @@ namespace ULE.SpawnEditor
                 return _snowRendererDirtyField;
             }
 
-            _snowRendererDirtyField = typeof(SnowWetRenderer).GetField("bool_1", AnyBinding);
+            _snowRendererDirtyField = typeof(SnowWetRenderer).GetField("_winterShowUpdated", AnyBinding);
             return _snowRendererDirtyField;
         }
 
         private static void TrySetCurrentScreenController(object battleController)
         {
-            if (battleController is not GInterface495<EEftScreenType> typedBattleController)
+            if (battleController is not EFT.UI.Screens.IBaseScreenController<EEftScreenType> typedBattleController)
             {
                 return;
             }
 
-            var screenManager = CurrentScreenSingletonClass.Instance;
+            var screenManager = EFT.UI.Screens.EftScreenManager.Instance;
             if (screenManager == null)
             {
                 return;
@@ -5930,7 +6172,7 @@ namespace ULE.SpawnEditor
         {
             try
             {
-                var screenManager = CurrentScreenSingletonClass.Instance;
+                var screenManager = EFT.UI.Screens.EftScreenManager.Instance;
                 if (screenManager == null)
                 {
                     return;
@@ -5960,15 +6202,6 @@ namespace ULE.SpawnEditor
             try
             {
                 MonoBehaviourSingleton<PreloaderUI>.Instance?.ResetTimersForShowRttAndLoss();
-            }
-            catch
-            {
-                // Best-effort only.
-            }
-
-            try
-            {
-                owner.GetType().GetMethod("method_29", AnyBinding)?.Invoke(owner, null);
             }
             catch
             {
@@ -6540,7 +6773,7 @@ namespace ULE.SpawnEditor
             Camera opticCamera = null;
             try
             {
-                opticCamera = CameraClass.Instance?.OpticCameraManager?.Camera;
+                opticCamera = EFT.CameraControl.CameraManager.Instance?.OpticCameraManager?.Camera;
             }
             catch
             {
@@ -7018,7 +7251,12 @@ namespace ULE.SpawnEditor
             {
                 var targetCameraField = typeof(CameraImage).GetField("targetCamera", AnyBinding);
                 var targetCamera = targetCameraField?.GetValue(cameraImage) as Camera;
-                var restoreMethod = typeof(CameraImage).GetMethod("method_4", AnyBinding, binder: null, types: new[] { typeof(Camera) }, modifiers: null);
+                var restoreMethod = typeof(CameraImage).GetMethod(
+                    "RestoreRenderSettings",
+                    AnyBinding,
+                    binder: null,
+                    types: new[] { typeof(Camera) },
+                    modifiers: null);
                 restoreMethod?.Invoke(cameraImage, new object[] { targetCamera });
             }
             catch
@@ -7041,7 +7279,7 @@ namespace ULE.SpawnEditor
 
             try
             {
-                var currentController = CurrentScreenSingletonClass.Instance.CurrentBaseScreenController;
+                var currentController = EFT.UI.Screens.EftScreenManager.Instance.CurrentBaseScreenController;
                 var currentScreenType = currentController?.ScreenType.ToString() ?? "<null>";
                 var liveScreenState = screen == null ? "screen=<null>" : $"screenActive={screen.gameObject.activeInHierarchy} path={GetTransformPath(screen.transform)}";
                 _log.LogInfo($"[ULE] Preview context: currentScreen={currentScreenType}, {liveScreenState}");
@@ -7569,7 +7807,7 @@ namespace ULE.SpawnEditor
                 var allLights = Resources.FindObjectsOfTypeAll<Light>();
                 var battleCamera = GetBattleCamera();
                 var battleMask = battleCamera != null ? battleCamera.cullingMask : 0;
-                var previewMask = 1 << LayerMaskClass.WeaponPreview;
+                var previewMask = 1 << LayersMaskController.WeaponPreview;
                 var activeEnabled = 0;
                 var activeEnabledBattleMasked = 0;
                 var activeEnabledPreviewOnly = 0;
@@ -7801,8 +8039,8 @@ namespace ULE.SpawnEditor
                 return "<null>";
             }
 
-            var visible = GetFieldValue(component, "bool_0");
-            var currentGroup = GetFieldValue(component, "canvasGroup_0") as CanvasGroup;
+            var visible = GetFieldValue(component, "_currentVisibility");
+            var currentGroup = GetFieldValue(component, "_currentShading") as CanvasGroup;
             var shadings = GetFieldValue(component, "_environmentShadings");
             var shadingEntries = DescribeEnvironmentShadingEntries(shadings);
             return $"{GetTransformPath(component.transform)} active={component.gameObject.activeInHierarchy} visible={visible ?? "<unknown>"} currentGroup={(currentGroup != null ? DescribeCanvasGroup(currentGroup) : "<null>")} entries={shadingEntries}";
@@ -7994,7 +8232,16 @@ namespace ULE.SpawnEditor
 
             try
             {
-                return instance.GetType().GetField(fieldName, AnyBinding)?.GetValue(instance);
+                foreach (var candidate in GetFieldNameCandidates(fieldName))
+                {
+                    var field = FindField(instance.GetType(), candidate);
+                    if (field != null)
+                    {
+                        return field.GetValue(instance);
+                    }
+                }
+
+                return null;
             }
             catch
             {
@@ -8011,13 +8258,97 @@ namespace ULE.SpawnEditor
 
             try
             {
-                var field = instance.GetType().GetField(fieldName, AnyBinding);
-                if (field == null)
+                foreach (var candidate in GetFieldNameCandidates(fieldName))
+                {
+                    var field = FindField(instance.GetType(), candidate);
+                    if (field == null)
+                    {
+                        continue;
+                    }
+
+                    field.SetValue(instance, value);
+                    return true;
+                }
+
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static FieldInfo FindField(Type type, string fieldName)
+        {
+            while (type != null)
+            {
+                var field = type.GetField(fieldName, AnyBinding);
+                if (field != null)
+                {
+                    return field;
+                }
+
+                type = type.BaseType;
+            }
+
+            return null;
+        }
+
+        private static object GetPropertyValue(object instance, string propertyName)
+        {
+            if (instance == null || string.IsNullOrEmpty(propertyName))
+            {
+                return null;
+            }
+
+            try
+            {
+                var type = instance.GetType();
+                while (type != null)
+                {
+                    var property = type.GetProperty(propertyName, AnyBinding);
+                    if (property != null)
+                    {
+                        return property.GetValue(instance, null);
+                    }
+
+                    type = type.BaseType;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+
+            return null;
+        }
+
+        private static IEnumerable<string> GetFieldNameCandidates(string fieldName)
+        {
+            yield return fieldName;
+
+        }
+
+        private static bool TryInvoke(object instance, string methodName, params object[] arguments)
+        {
+            if (instance == null || string.IsNullOrEmpty(methodName))
+            {
+                return false;
+            }
+
+            try
+            {
+                var method = instance.GetType()
+                    .GetMethods(AnyBinding)
+                    .FirstOrDefault(candidate =>
+                        string.Equals(candidate.Name, methodName, StringComparison.Ordinal) &&
+                        candidate.GetParameters().Length == (arguments?.Length ?? 0));
+                if (method == null)
                 {
                     return false;
                 }
 
-                field.SetValue(instance, value);
+                method.Invoke(instance, arguments);
                 return true;
             }
             catch
@@ -8054,12 +8385,8 @@ namespace ULE.SpawnEditor
         {
             try
             {
-                var disableField = typeof(WaterRendererv3).GetField("bool_0", AnyBinding);
-                var cachedField = typeof(WaterRendererv3).GetField("bool_1", AnyBinding);
-                var disableRequested = disableField?.GetValue(null)?.ToString() ?? "<unknown>";
-                var cachedDisable = cachedField?.GetValue(null)?.ToString() ?? "<unknown>";
                 var lastRequest = _lastPreviewSnowMaskDisableRequest.HasValue ? _lastPreviewSnowMaskDisableRequest.Value.ToString() : "<none>";
-                return $"disableRequested={disableRequested} cached={cachedDisable} requests={_previewSnowMaskDisableRequestCount} lastRequest={lastRequest} forces={_snowPresentationForceCount}";
+                return $"requests={_previewSnowMaskDisableRequestCount} lastRequest={lastRequest} forces={_snowPresentationForceCount}";
             }
             catch
             {
@@ -8078,7 +8405,7 @@ namespace ULE.SpawnEditor
 
                 try
                 {
-                    var controller = Class443.Controller;
+                    var controller = Seasons.Controller;
                     if (controller != null)
                     {
                         controllerState = $"{controller.Season}/{controller.Status} snowLevel={controller.SnowLevelOnTerrain:F3}";
@@ -8127,7 +8454,7 @@ namespace ULE.SpawnEditor
             var cameraPath = string.IsNullOrEmpty(_lastPreviewSnowPreCullCameraPath) ? "<none>" : _lastPreviewSnowPreCullCameraPath;
             var cameraTag = string.IsNullOrEmpty(_lastPreviewSnowPreCullCameraTag) ? "<none>" : _lastPreviewSnowPreCullCameraTag;
             var overridePath = string.IsNullOrEmpty(_lastSnowCommandBufferCameraOverridePath) ? "<none>" : _lastSnowCommandBufferCameraOverridePath;
-            return $"events={_previewSnowPreCullEventCount} accepted={_previewSnowPreCullAcceptedCameraCount} main={_previewSnowPreCullAcceptedMainCameraCount} optic={_previewSnowPreCullAcceptedOpticCameraCount} capturedBattle={_previewSnowPreCullCapturedBattleCameraCount} looksBattle={_previewSnowPreCullLooksBattleCameraCount} preview={_previewSnowPreCullPreviewCameraCount} ui={_previewSnowPreCullUiCameraCount} other={_previewSnowPreCullOtherCameraCount} cmdOverride={_snowCommandBufferCameraOverrideCount} lastOverride={overridePath} cameraClass={DescribeSnowCameraClassState()} lastCamera={cameraPath} tag={cameraTag} treatedAsBattle={_lastPreviewSnowPreCullTreatedAsBattleCamera}";
+            return $"events={_previewSnowPreCullEventCount} accepted={_previewSnowPreCullAcceptedCameraCount} main={_previewSnowPreCullAcceptedMainCameraCount} optic={_previewSnowPreCullAcceptedOpticCameraCount} capturedBattle={_previewSnowPreCullCapturedBattleCameraCount} looksBattle={_previewSnowPreCullLooksBattleCameraCount} preview={_previewSnowPreCullPreviewCameraCount} ui={_previewSnowPreCullUiCameraCount} other={_previewSnowPreCullOtherCameraCount} cmdOverride={_snowCommandBufferCameraOverrideCount} lastOverride={overridePath} cameraClass={DescribeSnowCameraManagerState()} lastCamera={cameraPath} tag={cameraTag} treatedAsBattle={_lastPreviewSnowPreCullTreatedAsBattleCamera}";
         }
 
         private static string DescribeSnowCommandBufferRebuildState()
@@ -8137,11 +8464,11 @@ namespace ULE.SpawnEditor
                 : _lastSnowCommandBufferRebuildState;
         }
 
-        private static string DescribeSnowCameraClassState()
+        private static string DescribeSnowCameraManagerState()
         {
             try
             {
-                var cameraManager = CameraClass.Instance;
+                var cameraManager = EFT.CameraControl.CameraManager.Instance;
                 var mainCamera = cameraManager?.Camera;
                 var opticCamera = cameraManager?.OpticCameraManager?.Camera;
                 return $"main={(mainCamera != null ? GetTransformPath(mainCamera.transform) : "<null>")} optic={(opticCamera != null ? GetTransformPath(opticCamera.transform) : "<null>")}";
@@ -8213,8 +8540,8 @@ namespace ULE.SpawnEditor
         {
             try
             {
-                var snowRendererManager = Class679.Class679_0;
-                var entries = snowRendererManager?.List_0;
+                var snowRendererManager = SnowRenderer.Instance;
+                var entries = GetFieldValue(snowRendererManager, "_data") as IList;
                 if (entries == null || entries.Count == 0)
                 {
                     return "<none>";
@@ -8229,9 +8556,10 @@ namespace ULE.SpawnEditor
                         continue;
                     }
 
-                    var camera = entry.Camera_0;
-                    var data = entry.Struct160_0;
-                    parts.Add($"camera={(camera != null ? GetTransformPath(camera.transform) : "<null>")} hdr={(camera != null ? camera.allowHDR.ToString() : "<null>")} owners={entry.List_0.Count} shadow={DescribeTexture(data.RenderTexture_0)} disableMask={DescribeTexture(data.RenderTexture_1)}");
+                    var camera = GetPropertyValue(entry, "Camera") as Camera;
+                    var data = GetPropertyValue(entry, "RendererData");
+                    var owners = GetPropertyValue(entry, "Owners") as IList;
+                    parts.Add($"camera={(camera != null ? GetTransformPath(camera.transform) : "<null>")} hdr={(camera != null ? camera.allowHDR.ToString() : "<null>")} owners={owners?.Count ?? 0} shadow={DescribeTexture(GetFieldValue(data, "ShadowMap") as Texture)} disableMask={DescribeTexture(GetFieldValue(data, "DisableSnowMask") as Texture)}");
                 }
 
                 return string.Join("; ", parts);
@@ -8607,9 +8935,7 @@ namespace ULE.SpawnEditor
                 var samples = new List<string>(Mathf.Min(lods.Length, 4));
                 var terrainField = GetFieldInHierarchy(terrainLodType, "_terrain");
                 var terrainLodField = GetFieldInHierarchy(terrainLodType, "_terrainLod");
-                var disableTerrainField = GetFieldInHierarchy(terrainLodType, "bool_0");
-                var disableTreesField = GetFieldInHierarchy(terrainLodType, "bool_1");
-                var visibleField = GetFieldInHierarchy(terrainLodType, "bool_2");
+                var visibleField = GetFieldInHierarchy(terrainLodType, "_terrainIsVisible");
 
                 foreach (var lod in lods.Take(4))
                 {
@@ -8619,7 +8945,7 @@ namespace ULE.SpawnEditor
                     var terrainLodObject = terrainLodField?.GetValue(lod) as GameObject;
                     var drawHeightmap = terrain != null ? GetMemberValue(terrain, "drawHeightmap") : null;
                     var drawFoliage = terrain != null ? GetMemberValue(terrain, "drawTreesAndFoliage") : null;
-                    samples.Add($"{(component != null ? GetTransformPath(component.transform) : "<null>")} active={(component != null && component.gameObject.activeInHierarchy)} terrain={(terrainComponent != null ? GetTransformPath(terrainComponent.transform) : "<null>")} visible={visibleField?.GetValue(lod) ?? "<null>"} disableTerrain={disableTerrainField?.GetValue(lod) ?? "<null>"} disableTrees={disableTreesField?.GetValue(lod) ?? "<null>"} drawHeightmap={drawHeightmap ?? "<null>"} drawFoliage={drawFoliage ?? "<null>"} lodObject={(terrainLodObject != null ? $"{terrainLodObject.name}:active={terrainLodObject.activeSelf}" : "<null>")}");
+                    samples.Add($"{(component != null ? GetTransformPath(component.transform) : "<null>")} active={(component != null && component.gameObject.activeInHierarchy)} terrain={(terrainComponent != null ? GetTransformPath(terrainComponent.transform) : "<null>")} visible={visibleField?.GetValue(lod) ?? "<null>"} drawHeightmap={drawHeightmap ?? "<null>"} drawFoliage={drawFoliage ?? "<null>"} lodObject={(terrainLodObject != null ? $"{terrainLodObject.name}:active={terrainLodObject.activeSelf}" : "<null>")}");
                 }
 
                 return $"all={lods.Length} active={activeCount} samples=[{string.Join(" || ", samples)}]";
@@ -8922,7 +9248,7 @@ namespace ULE.SpawnEditor
                 var script = active.FirstOrDefault() ?? all.FirstOrDefault();
                 var component = script as Component;
                 var terrainMaterial = GetFieldInHierarchy(winterScriptType, "TerrainMaterial")?.GetValue(script) as Material;
-                var repaint = GetFieldInHierarchy(winterScriptType, "gclass994_0")?.GetValue(script);
+                var repaint = GetFieldInHierarchy(winterScriptType, "_terrainDetailsRepaint")?.GetValue(script);
                 var details = GetFieldInHierarchy(winterScriptType, "TerrainDetails")?.GetValue(script) as Texture2D[];
                 return $"active={active.Length} all={all.Length} sample={(component != null ? GetTransformPath(component.transform) : "<null>")} enabled={(component is Behaviour behaviour && behaviour.enabled)} repaint={(repaint != null ? repaint.GetType().Name : "<null>")} terrainMaterial={DescribeMaterial(terrainMaterial)} detailTex=[{string.Join(",", (details ?? Array.Empty<Texture2D>()).Take(4).Select(texture => texture != null ? texture.name : "<null>"))}]";
             }
@@ -9075,7 +9401,7 @@ namespace ULE.SpawnEditor
         {
             try
             {
-                var manager = CurrentScreenSingletonClass.Instance;
+                var manager = EFT.UI.Screens.EftScreenManager.Instance;
                 var current = manager?.CurrentScreenController;
                 var currentBase = manager?.CurrentBaseScreenController;
                 var currentType = current != null ? current.ScreenType.ToString() : "<null>";
@@ -9827,7 +10153,7 @@ namespace ULE.SpawnEditor
                 var tryOpenReturnMs = FindStepTime(snapshot, "TryOpen.return true");
                 var loadingStartMs = FindStepTime(snapshot, "WeaponPreview.onLoadingStart.end");
                 var loadingFinishedMs = FindStepTime(snapshot, "WeaponPreview.onLoadingFinished.begin");
-                var slotIconsEndMs = FindStepTime(snapshot, "ItemObserveScreen.method_6.slotIcons.end");
+                var slotIconsEndMs = FindStepTime(snapshot, "ItemObserveScreen.CreateModSlotViews.end");
                 var bundleWaitMs = SpanBetween(loadingStartMs, loadingFinishedMs);
                 var postReturnMs = SpanBetween(tryOpenReturnMs, slotIconsEndMs >= 0d ? slotIconsEndMs : totalMs);
 
@@ -9840,7 +10166,7 @@ namespace ULE.SpawnEditor
                     $"setupPreviewCall={FormatTiming(FindDuration(snapshot, "WeaponPreview.SetupItemPreview"))}, " +
                     $"bundleWait={FormatTiming(bundleWaitMs)}, " +
                     $"prefab={FormatTiming(FindDuration(snapshot, "PoolManager.CreateCleanLootPrefab"))}, " +
-                    $"slotIcons={FormatTiming(FindDuration(snapshot, "ItemObserveScreen.method_6.slotIcons"))}, " +
+                    $"slotIcons={FormatTiming(FindDuration(snapshot, "ItemObserveScreen.CreateModSlotViews"))}, " +
                     $"postReturn={FormatTiming(postReturnMs)}");
                 log.LogInfo(
                     "[ULE]   wrapper: " +
@@ -9961,14 +10287,14 @@ namespace ULE.SpawnEditor
             public double ElapsedMs { get; }
         }
 
-        private sealed class RaidEditBuildController : EditBuildScreen.GClass3881
+        private sealed class RaidEditBuildController : EditBuildScreen.EditBuildScreenController
         {
-            public RaidEditBuildController(Item item, InventoryController inventoryController, ISession session)
+            public RaidEditBuildController(Item item, InventoryController inventoryController, EFT.IEftSession session)
                 : base(item, inventoryController, session)
             {
             }
 
-            public EditBuildScreen ScreenInstance => Gparam_0;
+            public EditBuildScreen ScreenInstance => Screen;
 
             public override EStateSwitcher MenuChatBarVisibility => EStateSwitcher.Disabled;
 
@@ -10011,7 +10337,7 @@ namespace ULE.SpawnEditor
             }
         }
 
-        private sealed class UleRuntimeAttachmentManipulation : GClass3468
+        private sealed class UleRuntimeAttachmentManipulation : EFT.InventoryLogic.EditBuildManipulation
         {
             private readonly BepInEx.Logging.ManualLogSource _log;
             private readonly HashSet<string> _loggedSlots = new HashSet<string>(StringComparer.Ordinal);
@@ -10088,7 +10414,7 @@ namespace ULE.SpawnEditor
             public int? StackCount;
             public readonly List<RuntimeFlatRecord> Children = new List<RuntimeFlatRecord>();
 
-            public static RuntimeFlatRecord FromFlatItem(FlatItemsDataClass flatItem)
+            public static RuntimeFlatRecord FromFlatItem(JsonType.FlatItem flatItem)
             {
                 if (flatItem == null)
                 {
@@ -10108,7 +10434,7 @@ namespace ULE.SpawnEditor
                 };
             }
 
-            private static string ToRawJson(GClass846 value)
+            private static string ToRawJson(UnparsedData value)
             {
                 try
                 {

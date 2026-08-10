@@ -1,6 +1,6 @@
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
-using SPTarkov.Server.Core.Services;
+using SPTarkov.Server.Core.Models.Spt.Tables;
 using UltimateLootEditor.Util;
 
 namespace UltimateLootEditor.Services;
@@ -14,23 +14,23 @@ public static class RuntimeAmmoResolver
     private static readonly Random Rng = new();
     private static readonly Dictionary<string, List<string>> CompatibleAmmoByMagazine = new(StringComparer.OrdinalIgnoreCase);
 
-    private static DatabaseService? _databaseService;
+    private static TemplateTable? _templateTable;
     private static Dictionary<string, TemplateItem> _templates = new(StringComparer.OrdinalIgnoreCase);
     private static List<string> _ammoTemplates = [];
     private static DateTime _lastRefreshUtc = DateTime.MinValue;
     private static bool _initialized;
 
-    public static void Initialize(DatabaseService databaseService)
+    public static void Initialize(TemplateTable templateTable)
     {
-        if (databaseService == null)
+        if (templateTable == null)
         {
             return;
         }
 
         lock (Sync)
         {
-            _databaseService = databaseService;
-            RebuildLocked(databaseService, "loaded");
+            _templateTable = templateTable;
+            RebuildLocked(templateTable, "loaded");
         }
     }
 
@@ -108,14 +108,14 @@ public static class RuntimeAmmoResolver
 
     private static void RefreshIfNeededLocked()
     {
-        if (_databaseService == null)
+        if (_templateTable == null)
         {
             return;
         }
 
         if (!_initialized || _templates.Count == 0)
         {
-            RebuildLocked(_databaseService, "loaded");
+            RebuildLocked(_templateTable, "loaded");
             return;
         }
 
@@ -127,9 +127,9 @@ public static class RuntimeAmmoResolver
 
         try
         {
-            if (_databaseService.GetItems().Count != _templates.Count)
+            if (_templateTable.Items.Count != _templates.Count)
             {
-                RebuildLocked(_databaseService, "refreshed");
+                RebuildLocked(_templateTable, "refreshed");
                 return;
             }
 
@@ -142,12 +142,12 @@ public static class RuntimeAmmoResolver
         }
     }
 
-    private static void RebuildLocked(DatabaseService databaseService, string verb)
+    private static void RebuildLocked(TemplateTable templateTable, string verb)
     {
         try
         {
-            _templates = databaseService
-                .GetItems()
+            _templates = templateTable
+                .Items
                 .Where(pair => !string.IsNullOrWhiteSpace(pair.Key.ToString()) && pair.Value != null)
                 .ToDictionary(pair => pair.Key.ToString(), pair => pair.Value, StringComparer.OrdinalIgnoreCase);
 

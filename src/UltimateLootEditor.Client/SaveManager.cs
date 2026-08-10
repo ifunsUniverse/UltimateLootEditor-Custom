@@ -76,15 +76,95 @@ namespace ULE.SpawnEditor
 
         public static void SaveMapEdits(MapEdits edits)
         {
-            NormalizeMapEdits(edits);
+            var snapshot = CloneMapEdits(edits);
+            NormalizeMapEdits(snapshot);
 
-            var folder = DbPaths.MapEditsFolder(edits.MapId);
+            var folder = DbPaths.MapEditsFolder(snapshot.MapId);
+            Directory.CreateDirectory(folder);
             var path = Path.Combine(folder, "edits.json");
-            var json = JsonConvert.SerializeObject(edits, Formatting.Indented, new JsonSerializerSettings
+            var json = JsonConvert.SerializeObject(snapshot, Formatting.Indented, new JsonSerializerSettings
             {
                 NullValueHandling = NullValueHandling.Ignore
             });
             File.WriteAllText(path, json);
+        }
+
+        public static MapEdits ShallowSnapshotMapEdits(MapEdits edits)
+        {
+            if (edits == null)
+            {
+                return new MapEdits();
+            }
+
+            return new MapEdits
+            {
+                MapId = edits.MapId,
+                BySpawnId = edits.BySpawnId?
+                    .Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value != null)
+                    .ToDictionary(
+                        pair => pair.Key,
+                        pair => pair.Value,
+                        System.StringComparer.Ordinal)
+                    ?? new Dictionary<string, SpawnEdit>()
+            };
+        }
+
+        public static MapEdits CloneMapEdits(MapEdits edits)
+        {
+            if (edits == null)
+            {
+                return new MapEdits();
+            }
+
+            return new MapEdits
+            {
+                MapId = edits.MapId,
+                BySpawnId = edits.BySpawnId?
+                    .Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value != null)
+                    .ToDictionary(
+                        pair => pair.Key,
+                        pair => CloneSpawnEdit(pair.Value),
+                        System.StringComparer.Ordinal)
+                    ?? new Dictionary<string, SpawnEdit>()
+            };
+        }
+
+        private static SpawnEdit CloneSpawnEdit(SpawnEdit edit)
+        {
+            if (edit == null)
+            {
+                return null;
+            }
+
+            return new SpawnEdit
+            {
+                SpawnChance = edit.SpawnChance,
+                IsAlwaysSpawn = edit.IsAlwaysSpawn,
+                UseGravity = edit.UseGravity,
+                IsCreated = edit.IsCreated,
+                Name = edit.Name,
+                Position = CloneVector(edit.Position),
+                Rotation = CloneVector(edit.Rotation),
+                Items = edit.Items?
+                    .Select(item => item?.Clone())
+                    .Where(item => item != null)
+                    .ToList()
+            };
+        }
+
+        private static SavedVector3 CloneVector(SavedVector3 value)
+        {
+            if (value == null)
+            {
+                return null;
+            }
+
+            return new SavedVector3
+            {
+                X = value.X,
+                Y = value.Y,
+                Z = value.Z
+            };
         }
 
         private static void NormalizeMapEdits(MapEdits edits)

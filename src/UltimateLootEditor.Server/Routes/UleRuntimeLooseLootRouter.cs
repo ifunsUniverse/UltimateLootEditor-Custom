@@ -1,10 +1,11 @@
+using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Callbacks;
 using SPTarkov.Server.Core.DI;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Models.Eft.Common;
+using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Models.Utils;
-using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Utils;
 using UltimateLootEditor.Services;
 using UltimateLootEditor.Shared;
@@ -14,11 +15,14 @@ namespace UltimateLootEditor.Routes;
 [Injectable]
 public sealed class UleRuntimeLooseLootRouter(
     JsonUtil jsonUtil,
-    DatabaseService databaseService,
+    LocationTable locationTable,
+    GlobalTable globalTable,
+    TemplateTable templateTable,
+    LocaleTable localeTable,
     ISptLogger<UleRuntimeLooseLootRouter> logger) : DynamicRouter(jsonUtil, [
     new RouteAction<EmptyRequestData>(
         "/ule/runtime/loose-loot",
-        (url, _, _, _) =>
+        (url, _, _, _, _) =>
         {
             try
             {
@@ -29,14 +33,13 @@ public sealed class UleRuntimeLooseLootRouter(
                     return ValueTask.FromResult(jsonUtil.Serialize(new RuntimeLooseLootError("Missing location id.")) ?? "{\"error\":\"Missing location id.\"}");
                 }
 
-                var locations = databaseService.GetLocations();
-                var mappedLocationId = locations.GetMappedKey(locationId);
+                var mappedLocationId = locationTable.GetMappedKey(locationId);
                 if (!string.IsNullOrWhiteSpace(mappedLocationId))
                 {
                     locationId = mappedLocationId;
                 }
 
-                var dictionary = locations.GetDictionary();
+                var dictionary = locationTable.GetDictionary();
                 if (!dictionary.TryGetValue(locationId, out var location) || location?.LooseLoot == null)
                 {
                     return ValueTask.FromResult(jsonUtil.Serialize(new RuntimeLooseLootError($"Location '{locationId}' has no loose loot.")) ?? "{\"error\":\"Location has no loose loot.\"}");
@@ -53,11 +56,11 @@ public sealed class UleRuntimeLooseLootRouter(
         }),
     new RouteAction<EmptyRequestData>(
         "/ule/runtime/item-sources",
-        (_, _, _, _) =>
+        (_, _, _, _, _) =>
         {
             try
             {
-                var sources = RuntimeTemplateIndex.GetRuntimeItemSources(databaseService);
+                var sources = RuntimeTemplateIndex.GetRuntimeItemSources(templateTable, localeTable);
                 return ValueTask.FromResult(jsonUtil.Serialize(sources) ?? "{}");
             }
             catch (Exception ex)
@@ -68,16 +71,11 @@ public sealed class UleRuntimeLooseLootRouter(
         }),
     new RouteAction<EmptyRequestData>(
         "/ule/runtime/item-presets",
-        (_, _, _, _) =>
+        (_, _, _, _, _) =>
         {
             try
             {
-                var globals = databaseService.GetGlobals();
-                var presets = globals?.GetType()
-                    .GetProperty("ItemPresets", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)
-                    ?.GetValue(globals);
-
-                return ValueTask.FromResult(jsonUtil.Serialize(presets) ?? "{}");
+                return ValueTask.FromResult(jsonUtil.Serialize(globalTable.ItemPresets) ?? "{}");
             }
             catch (Exception ex)
             {

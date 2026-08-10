@@ -17,13 +17,13 @@ using UnityEngine.UI;
 
 namespace ULE.SpawnEditor
 {
-    internal sealed class UleSpawnEditorWindow : Window<GClass3829>
+    internal sealed class UleSpawnEditorWindow : Window<EFT.UI.WindowContext>
     {
-        private static readonly BindingFlags WindowFieldFlags = BindingFlags.Instance | BindingFlags.NonPublic;
-        private static readonly FieldInfo WindowTransformField = typeof(Window<GClass3829>).GetField("_windowTransform", WindowFieldFlags);
-        private static readonly FieldInfo CaptionPanelField = typeof(Window<GClass3829>).GetField("_captionPanel", WindowFieldFlags);
-        private static readonly FieldInfo CaptionField = typeof(Window<GClass3829>).GetField("_caption", WindowFieldFlags);
-        private static readonly FieldInfo CloseButtonField = typeof(Window<GClass3829>).GetField("_closeButton", WindowFieldFlags);
+        private static readonly BindingFlags WindowFieldFlags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        private static readonly FieldInfo WindowTransformField = typeof(Window<EFT.UI.WindowContext>).GetField("_windowTransform", WindowFieldFlags);
+        private static readonly FieldInfo CaptionPanelField = typeof(Window<EFT.UI.WindowContext>).GetField("_captionPanel", WindowFieldFlags);
+        private static readonly FieldInfo CaptionField = typeof(Window<EFT.UI.WindowContext>).GetField("_caption", WindowFieldFlags);
+        private static readonly FieldInfo CloseButtonField = typeof(Window<EFT.UI.WindowContext>).GetField("_closeButton", WindowFieldFlags);
 
         private Action _requestClose;
         private bool _closing;
@@ -103,16 +103,19 @@ namespace ULE.SpawnEditor
         private const float DefaultWindowHeight = 650f;
         private const float WindowMargin = 0f;
         private const float NativeButtonWidth = 175f;
+        private const float NativeFooterActionButtonWidth = 110f;
         private const float NativeButtonHeight = 18f;
         private const float NativeButtonSpacing = 8f;
         private const float NativeHeaderInputHeight = 30f;
-        private const float NativeSpawnChanceInputWidth = 105f;
-        private const float NativeSpawnChanceInputTop = 4f;
+        private const float NativeSpawnChanceInputWidth = 155f;
+        private const float NativeSpawnChanceInputTop = 4.5f;
         private const float NativeFooterInputHeight = 30f;
         private const float NativeExistingSearchWidth = 470f;
         private const float NativeAddSearchWidth = NativeExistingSearchWidth;
+        private const float NativeCheckboxSize = 20f;
+        private const string NativeCheckboxBackgroundPath = "Menu UI/UI/Ragfair Screen/WindowsContainer/FiltersWindow/Inner/Filters/CheckboxBased/RememberFilter/Backround";
         private const float NativeHeaderHeight = 148f;
-        private const float NativeFooterHeight = 76f;
+        private const float NativeFooterHeight = 112f;
         private const float NativeResultsWidth = 858f;
         private const float NativeResultsTop = NativeHeaderHeight + NativeResultRowSpacing;
         private const float NativeResultsHeight = 446f;
@@ -131,6 +134,7 @@ namespace ULE.SpawnEditor
         private const float NativeResultRowHeight = 68f;
         private const float NativeResultRowSpacing = 4f;
         private const float NativeRowControlWidth = 78f;
+        private const float NativeRowActionButtonSpacing = 4f;
         private const float NativeRowWeightWidth = 46f;
         private const float NativeRowRemoveButtonSize = 20f;
         private const float NativeRowWeightHeight = 23f;
@@ -138,6 +142,8 @@ namespace ULE.SpawnEditor
         private const float NativeRowControlInset = 10f;
         private const float NativeRowControlYOffset = 3f;
         private const float NativeRowControlReservedWidth = 102f;
+        private const float NativeRowDualActionControlReservedWidth =
+            NativeRowControlReservedWidth + NativeRowControlWidth + NativeRowActionButtonSpacing;
         private const float NativeRowRemoveButtonInset = 4f;
         private const float NativeCompareStatusWidth = 180f;
         private const float NativeCompareStatusSpacing = 8f;
@@ -149,6 +155,8 @@ namespace ULE.SpawnEditor
         private const int NativeVirtualizedMaxResizePoolRows = 28;
         private const int EditorCanvasSortingOrder = 3000;
         private const float EditorCursorReapplyIntervalSeconds = 0.12f;
+
+        private const BindingFlags InstanceFieldFlags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
         private static readonly Color PanelColor = new Color(0.015f, 0.017f, 0.018f, 0.72f);
         private static readonly Color HeaderColor = new Color(0.055f, 0.065f, 0.068f, 0.88f);
@@ -170,6 +178,8 @@ namespace ULE.SpawnEditor
         private Text _statusText;
         private bool _usingInspectWindowShell;
         private bool _usingNativeInspectWindowContainer;
+        private bool _nativeShellFallbackLogged;
+        private bool _prewarmingNativeShell;
         private InfoWindow _inspectWindowShell;
         private UleSpawnEditorWindow _inspectInputWindow;
         private ItemSpecificationPanel _inspectPanelShell;
@@ -188,6 +198,7 @@ namespace ULE.SpawnEditor
         private string _lastBuildKey = string.Empty;
         private string _activeSpawnId = string.Empty;
         private int _activeSpawnDataVersion = -1;
+        private bool _nativeNumericDragActive;
         private EditorViewMode _viewMode = EditorViewMode.Edited;
         private string _itemFilter = string.Empty;
         private string _addQuery = string.Empty;
@@ -222,6 +233,8 @@ namespace ULE.SpawnEditor
         private static bool _setIgnoreInputLookupAttempted;
         private static FieldInfo _browseSearchInputField;
         private static TMP_InputField _nativeTextInputTemplate;
+        private static Toggle _nativeToggleTemplate;
+        private static RectTransform _nativeCheckboxBackgroundTemplate;
         private static EntityListElement _handbookEntityRowTemplate;
         private static GameObject _handbookEntityScrollTemplate;
         private static FieldInfo _handbookEntityNameField;
@@ -247,14 +260,7 @@ namespace ULE.SpawnEditor
 
         private void Update()
         {
-            if (!Plugin.UseTarkovUIForEditor.Value)
-            {
-                DestroyRoot();
-                ReleaseInputCapture();
-                return;
-            }
-
-            if (!LootEditorGUI.Open || _viz == null || _viz.ActiveSpawn == null)
+            if (!EditorWindowState.Open || _viz == null || _viz.ActiveSpawn == null)
             {
                 TryStartClosedEditorPrewarm();
                 HideRoot();
@@ -308,10 +314,11 @@ namespace ULE.SpawnEditor
                 return;
             }
 
+            HandleEditorClipboardShortcuts();
             SyncActiveSpawnSession();
             UpdateStatusLabel();
             var buildKey = BuildUiKey();
-            if (!string.Equals(buildKey, _lastBuildKey, StringComparison.Ordinal))
+            if (!_nativeNumericDragActive && !string.Equals(buildKey, _lastBuildKey, StringComparison.Ordinal))
             {
                 _lastBuildKey = buildKey;
                 RebuildContent();
@@ -348,74 +355,28 @@ namespace ULE.SpawnEditor
 
             if (TryCreateInspectWindowShell())
             {
+                _nativeShellFallbackLogged = false;
                 _lastBuildKey = string.Empty;
                 return;
             }
 
-            _root = new GameObject("ULE_TarkovStyleEditor");
-            var uiLayer = LayerMask.NameToLayer("UI");
-            if (uiLayer >= 0)
+            if (_prewarmingNativeShell)
             {
-                _root.layer = uiLayer;
+                DestroyRoot();
+                DestroyEditorEventSystem();
+                return;
             }
-            _root.transform.SetParent(transform, false);
 
-            var canvas = _root.AddComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.overrideSorting = true;
-            canvas.sortingOrder = EditorCanvasSortingOrder;
+            if (!_nativeShellFallbackLogged)
+            {
+                _nativeShellFallbackLogged = true;
+                _log?.LogWarning("[ULE] Native EFT editor templates are not available; closing the editor.");
+            }
 
-            var scaler = _root.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1920f, 1080f);
-            scaler.matchWidthOrHeight = 0.5f;
-
-            _root.AddComponent<GraphicRaycaster>();
-
-            _window = CreateRect("Window", _root.transform);
-            _window.anchorMin = new Vector2(0f, 1f);
-            _window.anchorMax = new Vector2(0f, 1f);
-            _window.pivot = new Vector2(0f, 1f);
-            _window.anchoredPosition = new Vector2(110f, -105f);
-            _window.sizeDelta = new Vector2(DefaultWindowWidth, DefaultWindowHeight);
-            AddImage(_window.gameObject, PanelColor);
-
-            var outline = _window.gameObject.AddComponent<Outline>();
-            outline.effectColor = new Color(0.55f, 0.62f, 0.66f, 0.60f);
-            outline.effectDistance = new Vector2(1f, -1f);
-
-            var vertical = _window.gameObject.AddComponent<VerticalLayoutGroup>();
-            vertical.spacing = 6f;
-            vertical.padding = new RectOffset(10, 10, 8, 10);
-            vertical.childControlWidth = true;
-            vertical.childControlHeight = false;
-            vertical.childForceExpandWidth = true;
-            vertical.childForceExpandHeight = false;
-
-            var dragTarget = _window.gameObject.AddComponent<DraggableWindow>();
-            dragTarget.Init(_window);
-
-            var resizeHandle = CreatePanel(_window, "ResizeHandle", new Color(0.45f, 0.50f, 0.52f, 0.45f));
-            resizeHandle.anchorMin = new Vector2(1f, 0f);
-            resizeHandle.anchorMax = new Vector2(1f, 0f);
-            resizeHandle.pivot = new Vector2(1f, 0f);
-            resizeHandle.anchoredPosition = new Vector2(-3f, 3f);
-            resizeHandle.sizeDelta = new Vector2(18f, 18f);
-            resizeHandle.gameObject.AddComponent<ResizableWindow>().Init(_window, MinWindowWidth, MinWindowHeight);
-
-            _content = CreateRect("Content", _window);
-            var contentLayout = _content.gameObject.AddComponent<VerticalLayoutGroup>();
-            contentLayout.spacing = 6f;
-            contentLayout.padding = new RectOffset(0, 0, 0, 0);
-            contentLayout.childControlWidth = true;
-            contentLayout.childControlHeight = false;
-            contentLayout.childForceExpandWidth = true;
-            contentLayout.childForceExpandHeight = false;
-            var contentElement = _content.gameObject.AddComponent<LayoutElement>();
-            contentElement.flexibleHeight = 1f;
-            contentElement.minHeight = 1f;
-
-            _lastBuildKey = string.Empty;
+            EditorWindowState.Open = false;
+            _viz?.CloseEditorWithoutSaving();
+            DestroyEditorEventSystem();
+            ReleaseInputCapture();
         }
 
         private void TryStartClosedEditorPrewarm()
@@ -441,7 +402,15 @@ namespace ULE.SpawnEditor
         {
             _nextPrewarmAttemptAt = Time.unscaledTime + 5f;
 
-            EnsureRoot();
+            _prewarmingNativeShell = true;
+            try
+            {
+                EnsureRoot();
+            }
+            finally
+            {
+                _prewarmingNativeShell = false;
+            }
             HideRoot();
             DestroyEditorEventSystem();
             yield return null;
@@ -596,7 +565,7 @@ namespace ULE.SpawnEditor
             }
             catch (Exception ex)
             {
-                _log?.LogWarning($"[ULE] Failed to create inspect-window editor shell, using fallback UI: {ex.Message}");
+                _log?.LogWarning($"[ULE] Failed to create native inspect-window editor shell: {ex.Message}");
                 DestroyRoot();
                 return false;
             }
@@ -606,7 +575,7 @@ namespace ULE.SpawnEditor
         {
             return instance?
                 .GetType()
-                .GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic)
+                .GetField(fieldName, InstanceFieldFlags)
                 ?.GetValue(instance) as T;
         }
 
@@ -634,7 +603,7 @@ namespace ULE.SpawnEditor
             try
             {
                 var context = _inspectInputWindow.Show();
-                itemUiContext.method_10<GClass3829>(_inspectInputWindow, context);
+                itemUiContext.RegisterWindow(_inspectInputWindow, context);
             }
             catch (Exception ex)
             {
@@ -662,7 +631,7 @@ namespace ULE.SpawnEditor
                 RemoveMatchingPrivateListEntries(itemUiContext, "_children", entry =>
                     ReferenceEquals(entry, _inspectInputWindow) || ReferenceEquals(entry, _inspectWindowShell));
 
-                RemoveMatchingPrivateListEntries(itemUiContext, "list_1", entry =>
+                RemoveMatchingPrivateListEntries(itemUiContext, "_windows", entry =>
                 {
                     if (entry == null)
                     {
@@ -687,7 +656,7 @@ namespace ULE.SpawnEditor
         {
             var list = owner?
                 .GetType()
-                .GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic)
+                .GetField(fieldName, InstanceFieldFlags)
                 ?.GetValue(owner) as System.Collections.IList;
             if (list == null || shouldRemove == null)
             {
@@ -1459,7 +1428,7 @@ namespace ULE.SpawnEditor
 
             if (_inspectInputWindow != null && _inspectInputWindow.WindowContext == null)
             {
-                _inspectInputWindow.WindowContext = new GClass3829();
+                _inspectInputWindow.WindowContext = new EFT.UI.WindowContext();
             }
         }
 
@@ -1748,7 +1717,7 @@ namespace ULE.SpawnEditor
 
             CreateButton(top, "Undo", CanUndoActiveSpawn, UndoActiveSpawnChange, width: 70f);
             CreateButton(top, "Redo", CanRedoActiveSpawn, RedoActiveSpawnChange, width: 70f);
-            CreateButton(top, "Save", true, () => CloseEditor(save: true), width: 70f);
+            CreateButton(top, "Save", true, SaveEditorEdits, width: 70f);
             CreateButton(top, "X", true, () => CloseEditor(save: false), width: 34f);
 
             var details = CreateText(
@@ -1826,18 +1795,34 @@ namespace ULE.SpawnEditor
             var headerBackground = EnsureNativePanelBackgroundClone(header, "ULE_NativeHeaderBackground");
             Stretch(headerBackground, -NativeResultsSideMargin, 0f, -NativeResultsSideMargin, 0f);
 
-            var spawnIdLabel = CreateNativeLabelAt(header, $"Spawn ID: {spawn.Id}", 13f, bold: false, 18f, 10f, 780f, 20f);
-            SetStretchTop(spawnIdLabel?.rectTransform, 18f, 10f, 18f, 20f);
-            var positionLabel = CreateNativeLabelAt(
-                header,
-                $"Position: ({spawn.Position.x:0.##}, {spawn.Position.y:0.##}, {spawn.Position.z:0.##})     Possible items: {spawn.ItemCountSummary}",
-                13f,
-                bold: false,
-                18f,
-                36f,
-                760f,
-                20f);
-            SetStretchTop(positionLabel?.rectTransform, 18f, 36f, 18f, 20f);
+            if (editable && includeControls && spawn?.IsUserCreated == true)
+            {
+                CreateNativeLabelAt(header, "Name:", 13f, bold: false, 18f, 10f, 44f, 20f);
+                var nameInput = CreateNativeInput(
+                    header,
+                    "NativeSpawnNameInput",
+                    string.IsNullOrWhiteSpace(spawn.Name) ? string.Empty : spawn.Name.Trim(),
+                    TMP_InputField.ContentType.Standard,
+                    TMP_InputField.CharacterValidation.None,
+                    "New spawn name",
+                    showSearchIcon: false,
+                    textFontSize: 12f);
+                SetTopLeft(nameInput != null ? nameInput.GetComponent<RectTransform>() : null, 62f, 9.5f, 260f, 21f);
+                NormalizeNativeInputViewport(nameInput, 6f, 4f);
+                if (nameInput != null)
+                {
+                    nameInput.onEndEdit.AddListener(ApplyEditedSpawnName);
+                }
+
+                var spawnIdLabel = CreateNativeLabelAt(header, $"Spawn ID: {spawn.Id}", 13f, bold: false, 340f, 10f, 440f, 20f);
+                SetStretchTop(spawnIdLabel?.rectTransform, 340f, 10f, 18f, 20f);
+            }
+            else
+            {
+                var spawnIdLabel = CreateNativeLabelAt(header, $"Spawn ID: {spawn.Id}", 13f, bold: false, 18f, 10f, 780f, 20f);
+                SetStretchTop(spawnIdLabel?.rectTransform, 18f, 10f, 18f, 20f);
+            }
+            BuildNativeSkeletonTransformRow(header, spawn, editable && includeControls);
 
             if (!includeControls)
             {
@@ -1847,6 +1832,216 @@ namespace ULE.SpawnEditor
             BuildNativeSkeletonSpawnChanceInput(header, displaySpawn ?? spawn, vanilla, editable);
             BuildNativeSkeletonModeRow(header);
             BuildNativeSkeletonSearchRow(header);
+        }
+
+        private void BuildNativeSkeletonTransformRow(Transform header, SpawnPointData spawn, bool editable)
+        {
+            const float y = 36f;
+            if (spawn == null)
+            {
+                CreateNativeLabelAt(header, "Position: unavailable", 13f, bold: false, 18f, y, 760f, 20f);
+                return;
+            }
+
+            if (!editable)
+            {
+                CreateNativeLabelAt(
+                    header,
+                    $"Position: ({spawn.Position.x:0.###}, {spawn.Position.y:0.###}, {spawn.Position.z:0.###})     Rotation: ({spawn.Rotation.x:0.###}, {spawn.Rotation.y:0.###}, {spawn.Rotation.z:0.###})     Possible items: {spawn.ItemCountSummary}",
+                    13f,
+                    bold: false,
+                    18f,
+                    y,
+                    760f,
+                    20f);
+                return;
+            }
+
+            const float inputWidth = 56f;
+            const float axisLabelGap = 3f;
+            const float fieldGap = 8f;
+
+            float BuildAxisInput(
+                string axisLabel,
+                string inputName,
+                float currentValue,
+                float axisX,
+                Action<float> applyValue,
+                Action<float> dragValue)
+            {
+                var labelWidth = axisLabel.Length <= 1 ? 10f : 34f;
+                CreateNativeLabelAt(header, axisLabel, 10f, bold: false, axisX, y, labelWidth, 20f);
+                var inputX = axisX + labelWidth + axisLabelGap;
+                var dragFormatter = inputName.IndexOf("Rotation", StringComparison.OrdinalIgnoreCase) >= 0
+                    ? FormatRotationCoordinate
+                    : (Func<float, string>)null;
+                CreateNativeVectorInput(header, inputName, currentValue, inputX, y, inputWidth, applyValue, dragValue, dragFormatter);
+                return inputX + inputWidth + fieldGap;
+            }
+
+            CreateNativeLabelAt(header, "Position", 13f, bold: false, 18f, y, 54f, 20f);
+            var nextX = 78f;
+            nextX = BuildAxisInput("X", "NativePositionX", spawn.Position.x, nextX, value =>
+            {
+                var active = _viz?.ActiveSpawn;
+                if (active != null)
+                {
+                    ApplyEditedSpawnPosition(new Vector3(value, active.Position.y, active.Position.z));
+                }
+            }, value =>
+            {
+                var active = _viz?.ActiveSpawn;
+                if (active != null)
+                {
+                    ApplyEditedSpawnPosition(new Vector3(value, active.Position.y, active.Position.z), coalesce: true, rebuild: false);
+                }
+            });
+            nextX = BuildAxisInput("Y", "NativePositionY", spawn.Position.y, nextX, value =>
+            {
+                var active = _viz?.ActiveSpawn;
+                if (active != null)
+                {
+                    ApplyEditedSpawnPosition(new Vector3(active.Position.x, value, active.Position.z));
+                }
+            }, value =>
+            {
+                var active = _viz?.ActiveSpawn;
+                if (active != null)
+                {
+                    ApplyEditedSpawnPosition(new Vector3(active.Position.x, value, active.Position.z), coalesce: true, rebuild: false);
+                }
+            });
+            BuildAxisInput("Z", "NativePositionZ", spawn.Position.z, nextX, value =>
+            {
+                var active = _viz?.ActiveSpawn;
+                if (active != null)
+                {
+                    ApplyEditedSpawnPosition(new Vector3(active.Position.x, active.Position.y, value));
+                }
+            }, value =>
+            {
+                var active = _viz?.ActiveSpawn;
+                if (active != null)
+                {
+                    ApplyEditedSpawnPosition(new Vector3(active.Position.x, active.Position.y, value), coalesce: true, rebuild: false);
+                }
+            });
+
+            CreateNativeLabelAt(header, "Rotation", 13f, bold: false, 314f, y, 54f, 20f);
+            nextX = 376f;
+            nextX = BuildAxisInput("X Pitch", "NativeRotationX", spawn.Rotation.x, nextX, value =>
+            {
+                var active = _viz?.ActiveSpawn;
+                if (active != null)
+                {
+                    ApplyEditedSpawnRotation(new Vector3(value, active.Rotation.y, active.Rotation.z));
+                }
+            }, value =>
+            {
+                var active = _viz?.ActiveSpawn;
+                if (active != null)
+                {
+                    ApplyEditedSpawnRotation(new Vector3(value, active.Rotation.y, active.Rotation.z), coalesce: true, rebuild: false);
+                }
+            });
+            nextX = BuildAxisInput("Y Yaw", "NativeRotationY", spawn.Rotation.y, nextX, value =>
+            {
+                var active = _viz?.ActiveSpawn;
+                if (active != null)
+                {
+                    ApplyEditedSpawnRotation(new Vector3(active.Rotation.x, value, active.Rotation.z));
+                }
+            }, value =>
+            {
+                var active = _viz?.ActiveSpawn;
+                if (active != null)
+                {
+                    ApplyEditedSpawnRotation(new Vector3(active.Rotation.x, value, active.Rotation.z), coalesce: true, rebuild: false);
+                }
+            });
+            nextX = BuildAxisInput("Z Roll", "NativeRotationZ", spawn.Rotation.z, nextX, value =>
+            {
+                var active = _viz?.ActiveSpawn;
+                if (active != null)
+                {
+                    ApplyEditedSpawnRotation(new Vector3(active.Rotation.x, active.Rotation.y, value));
+                }
+            }, value =>
+            {
+                var active = _viz?.ActiveSpawn;
+                if (active != null)
+                {
+                    ApplyEditedSpawnRotation(new Vector3(active.Rotation.x, active.Rotation.y, value), coalesce: true, rebuild: false);
+                }
+            });
+
+            var gravityToggle = CreateNativeCheckboxAt(
+                header,
+                "ULE_NativeGravityToggle",
+                "Gravity",
+                spawn.UseGravity,
+                editable,
+                value => ApplyEditedSpawnUseGravity(value),
+                nextX,
+                y - 2f,
+                76f,
+                NativeButtonHeight + 2f);
+            SetLayoutIgnore(gravityToggle?.GetComponent<RectTransform>(), true);
+        }
+
+        private void CreateNativeVectorInput(
+            Transform parent,
+            string name,
+            float value,
+            float x,
+            float y,
+            float width,
+            Action<float> applyValue,
+            Action<float> dragValue = null,
+            Func<float, string> dragFormatter = null)
+        {
+            var input = CreateNativeInput(
+                parent,
+                name,
+                FormatCoordinate(value),
+                TMP_InputField.ContentType.Standard,
+                TMP_InputField.CharacterValidation.None,
+                textFontSize: 12f);
+            var rect = input != null ? input.GetComponent<RectTransform>() : null;
+            SetTopLeft(rect, x, y - 0.5f, width, 21f);
+            NormalizeNativeInputViewport(input, 4f, 3f);
+            if (input == null)
+            {
+                return;
+            }
+
+            input.onEndEdit.AddListener(text =>
+            {
+                if (!float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
+                {
+                    MarkDirtyAndRebuild();
+                    return;
+                }
+
+                applyValue?.Invoke(parsed);
+            });
+
+            var drag = input.gameObject.GetComponent<NativeNumericDragHandler>() ??
+                       input.gameObject.AddComponent<NativeNumericDragHandler>();
+            drag.Init(
+                input,
+                value,
+                dragFormatter,
+                parsedValue =>
+                {
+                    _nativeNumericDragActive = true;
+                    dragValue?.Invoke(parsedValue);
+                },
+                () =>
+                {
+                    _nativeNumericDragActive = false;
+                    MarkDirtyAndRebuild();
+                });
         }
 
         private void BuildNativeSkeletonModeRow(Transform header)
@@ -1884,7 +2079,125 @@ namespace ULE.SpawnEditor
         private void SetViewMode(EditorViewMode mode)
         {
             _viewMode = mode;
+            if (mode != EditorViewMode.Edited)
+            {
+                _viz?.EnsureActiveVanillaDetailsLoaded();
+            }
+
             _lastBuildKey = string.Empty;
+        }
+
+        private void CopyActiveSpawnToClipboard()
+        {
+            if (_viz == null)
+            {
+                return;
+            }
+
+            if (_viz.CopyActiveSpawnToClipboard(out var message))
+            {
+                NativeNotifications.Show("Items copied");
+            }
+
+            ShowStatus(message);
+            MarkDirtyAndRebuild();
+        }
+
+        private void PasteSpawnClipboard()
+        {
+            if (_viz == null || !_viz.HasSpawnClipboard || _viz.ActiveSpawn == null)
+            {
+                return;
+            }
+
+            PushUndoSnapshot("paste-spawn", coalesce: false);
+            if (_viz.PasteClipboardToActiveSpawn(out var message))
+            {
+                _viewMode = EditorViewMode.Edited;
+                ResetSearchAndFilters();
+                NativeNotifications.Show("Items added");
+                MarkDirtyAndRebuild();
+            }
+
+            ShowStatus(message);
+        }
+
+        private void ReplaceSpawnClipboard()
+        {
+            if (_viz == null || !_viz.HasSpawnClipboard || _viz.ActiveSpawn == null)
+            {
+                return;
+            }
+
+            PushUndoSnapshot("replace-spawn", coalesce: false);
+            if (_viz.ReplaceActiveSpawnWithClipboard(out var message))
+            {
+                _viewMode = EditorViewMode.Edited;
+                ResetSearchAndFilters();
+                NativeNotifications.Show("Items replaced");
+                MarkDirtyAndRebuild();
+            }
+
+            ShowStatus(message);
+        }
+
+        private void HandleEditorClipboardShortcuts()
+        {
+            if (_viz == null ||
+                _viz.ActiveSpawn == null ||
+                _presetScreenOpen ||
+                IsUnityTextInputFocused() ||
+                !(Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)))
+            {
+                return;
+            }
+
+            if (Input.GetKeyDown(KeyCode.C))
+            {
+                CopyActiveSpawnToClipboard();
+                return;
+            }
+
+            if (Input.GetKeyDown(KeyCode.V))
+            {
+                PasteSpawnClipboard();
+                return;
+            }
+
+            if (Input.GetKeyDown(KeyCode.S))
+            {
+                SaveEditorEdits();
+                return;
+            }
+
+            if (Input.GetKeyDown(KeyCode.Z))
+            {
+                UndoActiveSpawnChange();
+                return;
+            }
+
+            if (Input.GetKeyDown(KeyCode.Y))
+            {
+                RedoActiveSpawnChange();
+            }
+        }
+
+        private static bool IsUnityTextInputFocused()
+        {
+            var selected = EventSystem.current?.currentSelectedGameObject;
+            if (selected == null)
+            {
+                return false;
+            }
+
+            var tmpInput = selected.GetComponent<TMP_InputField>() ?? selected.GetComponentInParent<TMP_InputField>();
+            if (tmpInput != null && tmpInput.isFocused)
+            {
+                return true;
+            }
+
+            var input = selected.GetComponent<InputField>() ?? selected.GetComponentInParent<InputField>();
+            return input != null && input.isFocused;
         }
 
         private void BuildNativeSkeletonSpawnChanceInput(Transform header, SpawnPointData spawn, SpawnPointData vanilla, bool editable)
@@ -1892,7 +2205,7 @@ namespace ULE.SpawnEditor
             EnsureAlwaysSpawnSupportFromVanilla(spawn, vanilla);
 
             var row = CreateNativeFreeRow(header, "NativeSpawnChanceRow", NativeHeaderInputHeight);
-            SetTopLeft(row, 18f, 62f, 430f, NativeHeaderInputHeight);
+            SetTopLeft(row, 18f, 62f, 520f, NativeHeaderInputHeight);
             var chanceLabel = CreateNativeLabelAt(row, "Spawn Chance:", 13f, bold: false, 0f, 0f, 114f, NativeHeaderInputHeight);
 
             _chanceInput = null;
@@ -1945,7 +2258,7 @@ namespace ULE.SpawnEditor
             var alwaysSpawnText = SupportsAlwaysSpawnUi(spawn, vanilla)
                 ? (spawn != null && spawn.IsAlwaysSpawn ? "Always Spawn: Yes" : "Always Spawn: No")
                 : "Always Spawn: Not available";
-            var alwaysLabel = CreateNativeLabelAt(row, alwaysSpawnText, 13f, bold: false, 222f, 0f, 206f, NativeHeaderInputHeight);
+            var alwaysLabel = CreateNativeLabelAt(row, alwaysSpawnText, 13f, bold: false, 280f, 0f, 206f, NativeHeaderInputHeight);
         }
 
         private void BuildNativeSkeletonSearchRow(Transform header)
@@ -2085,6 +2398,16 @@ namespace ULE.SpawnEditor
             return Mathf.Clamp01(value).ToString("0.#########", CultureInfo.InvariantCulture);
         }
 
+        private static string FormatCoordinate(float value)
+        {
+            return value.ToString("0.###", CultureInfo.InvariantCulture);
+        }
+
+        private static string FormatRotationCoordinate(float value)
+        {
+            return FormatCoordinate(NormalizeAngle(value));
+        }
+
         private static string FormatSpawnChanceDelta(float value)
         {
             var clamped = Mathf.Clamp(value, -1f, 1f);
@@ -2140,7 +2463,9 @@ namespace ULE.SpawnEditor
                         return null;
                     }
 
-                    var displayName = !string.IsNullOrWhiteSpace(candidate.DisplayName)
+                    var displayName = candidate.TemplateItem != null
+                        ? FormatItemDisplayName(item)
+                        : !string.IsNullOrWhiteSpace(candidate.DisplayName)
                         ? candidate.DisplayName
                         : FormatItemDisplayName(item);
                     return new CachedItemRow
@@ -2812,13 +3137,44 @@ namespace ULE.SpawnEditor
 
             if (!PresetPreviewBridge.CanOpen(rowData.Item))
             {
+                PreviewActiveSpawnItem(rowData.Item);
                 return;
             }
 
             OpenPresetScreen(rowData.Item, readOnly: _viewMode != EditorViewMode.Edited);
         }
 
-        private static GClass2067 TryGetWishlistManager()
+        private void HandleSpawnItemRowEdit(CachedItemRow rowData)
+        {
+            if (rowData?.Item == null)
+            {
+                return;
+            }
+
+            if (!PresetPreviewBridge.CanOpen(rowData.Item))
+            {
+                ShowStatus("This item does not support attachment editing.");
+                return;
+            }
+
+            ShowStatus("Opening item editor...");
+            _log?.LogInfo($"[ULE] Opening item editor for {rowData.Item.Tpl} ({rowData.DisplayName ?? "item"}).");
+            OpenPresetScreen(rowData.Item, readOnly: _viewMode != EditorViewMode.Edited);
+        }
+
+        private void HandleSpawnItemRowView(CachedItemRow rowData)
+        {
+            if (rowData?.Item == null)
+            {
+                return;
+            }
+
+            ShowStatus("Loading item preview...");
+            _log?.LogInfo($"[ULE] Loading item placement preview for {rowData.Item.Tpl} ({rowData.DisplayName ?? "item"}).");
+            PreviewActiveSpawnItem(rowData.Item);
+        }
+
+        private static EFT.WishlistManager TryGetWishlistManager()
         {
             try
             {
@@ -2830,7 +3186,7 @@ namespace ULE.SpawnEditor
             }
         }
 
-        private static bool TryResolveHandbookNode(string templateId, out EntityNodeClass node)
+        private static bool TryResolveHandbookNode(string templateId, out EFT.HandBook.HandbookNode node)
         {
             node = null;
             if (string.IsNullOrWhiteSpace(templateId))
@@ -2840,12 +3196,12 @@ namespace ULE.SpawnEditor
 
             try
             {
-                if (!Singleton<HandbookClass>.Instantiated)
+                if (!Singleton<EFT.HandBook.Handbook>.Instantiated)
                 {
                     return false;
                 }
 
-                var handbook = Singleton<HandbookClass>.Instance;
+                var handbook = Singleton<EFT.HandBook.Handbook>.Instance;
                 node = handbook?.EncyclopediaNodes?[templateId];
                 if (node == null && handbook != null)
                 {
@@ -2918,7 +3274,7 @@ namespace ULE.SpawnEditor
         {
             if (view != null)
             {
-                view.Boolean_0 = true;
+                view.Selected = true;
             }
 
             if (row == null)
@@ -3062,11 +3418,23 @@ namespace ULE.SpawnEditor
             return false;
         }
 
-        private static float GetNativeRowReservedWidth(CachedItemRow rowData)
+        private float GetNativeRowReservedWidth(CachedItemRow rowData)
         {
+            var baseWidth = ShouldUseDualNativeRowActions(rowData)
+                ? NativeRowDualActionControlReservedWidth
+                : NativeRowControlReservedWidth;
             return string.IsNullOrWhiteSpace(rowData?.CompareStatusText)
-                ? NativeRowControlReservedWidth
-                : NativeRowControlReservedWidth + NativeCompareStatusSpacing + NativeCompareStatusWidth;
+                ? baseWidth
+                : baseWidth + NativeCompareStatusSpacing + NativeCompareStatusWidth;
+        }
+
+        private bool ShouldUseDualNativeRowActions(CachedItemRow rowData)
+        {
+            return _viewMode == EditorViewMode.Edited &&
+                   rowData?.Item != null &&
+                   rowData.AddCandidate == null &&
+                   PresetPreviewBridge.CanOpen(rowData.Item) &&
+                   PresetPreviewBridge.CanCreateWorldPreview(rowData.Item);
         }
 
         private static void ReserveHandbookRowControlSpace(GameObject row, float reservedWidth)
@@ -3548,23 +3916,27 @@ namespace ULE.SpawnEditor
             {
                 Destroy(existing.gameObject);
             }
+            ResetNativeRowActionRouter(row);
 
             AddNativeCompareStatusLabel(row, rowData);
             AddNativeRemoveItemButton(row, rowData);
 
+            var actionRowWidth = ShouldUseDualNativeRowActions(rowData)
+                ? NativeRowControlWidth * 2f + NativeRowActionButtonSpacing
+                : NativeRowControlWidth;
             var holder = CreateRect("ULE_ItemRowControls", row);
             holder.anchorMin = new Vector2(1f, 0.5f);
             holder.anchorMax = new Vector2(1f, 0.5f);
             holder.pivot = new Vector2(1f, 0.5f);
             holder.anchoredPosition = new Vector2(-NativeRowControlInset, NativeRowControlYOffset);
-            holder.sizeDelta = new Vector2(NativeRowControlWidth, NativeResultRowHeight - 10f);
+            holder.sizeDelta = new Vector2(actionRowWidth, NativeResultRowHeight - 10f);
             var layout = holder.gameObject.AddComponent<LayoutElement>();
             layout.ignoreLayout = true;
 
             var stack = holder.gameObject.AddComponent<VerticalLayoutGroup>();
             stack.spacing = 2f;
             stack.padding = new RectOffset(0, 0, 2, 2);
-            stack.childAlignment = TextAnchor.MiddleLeft;
+            stack.childAlignment = TextAnchor.MiddleRight;
             stack.childControlWidth = true;
             stack.childForceExpandWidth = false;
             stack.childControlHeight = true;
@@ -3606,16 +3978,157 @@ namespace ULE.SpawnEditor
                 }
             }
 
-            var canUseAction = isAddRow
-                ? _viewMode == EditorViewMode.Edited
-                : _viewMode == EditorViewMode.Edited && PresetPreviewBridge.CanOpen(rowData.Item);
-            CreateNativeButtonOnly(
-                holder,
-                isAddRow ? "ADD" : "EDIT",
-                canUseAction,
-                () => HandleSpawnItemRowActivated(rowData),
-                NativeRowControlWidth);
+            if (isAddRow)
+            {
+                var addEnabled = _viewMode == EditorViewMode.Edited;
+                var actionRow = CreateNativeRowActionContainer(holder, NativeRowControlWidth);
+                var addSlot = CreateNativeRowActionSlot(actionRow, "ADD", addEnabled, NativeRowControlWidth, () => HandleSpawnItemRowActivated(rowData));
+                AddNativeRowActionRoute(row, addSlot, addEnabled, () => HandleSpawnItemRowActivated(rowData));
+                holder.SetAsLastSibling();
+                return;
+            }
+
+            var canOpenPresetEditor = PresetPreviewBridge.CanOpen(rowData.Item);
+            var canPreviewWorldItem = PresetPreviewBridge.CanCreateWorldPreview(rowData.Item);
+            var canUseActions = _viewMode == EditorViewMode.Edited;
+
+            if (canOpenPresetEditor && canPreviewWorldItem)
+            {
+                var actionRow = CreateNativeRowActionContainer(holder, actionRowWidth);
+                var viewSelected = _viz != null && _viz.IsPreviewingActiveSpawnItem(rowData.Item);
+                var viewSlot = CreateNativeRowActionSlot(actionRow, "VIEW", canUseActions, NativeRowControlWidth, () => HandleSpawnItemRowView(rowData), viewSelected);
+                var editSlot = CreateNativeRowActionSlot(actionRow, "EDIT", canUseActions, NativeRowControlWidth, () => HandleSpawnItemRowEdit(rowData));
+                AddNativeRowActionRoute(row, viewSlot, canUseActions, () => HandleSpawnItemRowView(rowData));
+                AddNativeRowActionRoute(row, editSlot, canUseActions, () => HandleSpawnItemRowEdit(rowData));
+            }
+            else
+            {
+                var actionText = canOpenPresetEditor ? "EDIT" : "VIEW";
+                var actionEnabled = canUseActions && (canOpenPresetEditor || canPreviewWorldItem);
+                var actionCallback = canOpenPresetEditor
+                    ? new Action(() => HandleSpawnItemRowEdit(rowData))
+                    : new Action(() => HandleSpawnItemRowView(rowData));
+                var actionRow = CreateNativeRowActionContainer(holder, NativeRowControlWidth);
+                var actionSelected = !canOpenPresetEditor && _viz != null && _viz.IsPreviewingActiveSpawnItem(rowData.Item);
+                var actionSlot = CreateNativeRowActionSlot(actionRow, actionText, actionEnabled, NativeRowControlWidth, actionCallback, actionSelected);
+                AddNativeRowActionRoute(row, actionSlot, actionEnabled, actionCallback);
+            }
+
             holder.SetAsLastSibling();
+        }
+
+        private RectTransform CreateNativeRowActionContainer(Transform parent, float width)
+        {
+            var actionRow = CreateRect("ULE_ItemActionRow", parent);
+            SetLayout(actionRow, minWidth: width, preferredWidth: width, minHeight: NativeButtonHeight, preferredHeight: NativeButtonHeight, flexibleWidth: 0f, flexibleHeight: 0f);
+            var actionLayout = actionRow.gameObject.AddComponent<HorizontalLayoutGroup>();
+            actionLayout.spacing = NativeRowActionButtonSpacing;
+            actionLayout.padding = new RectOffset(0, 0, 0, 0);
+            actionLayout.childAlignment = TextAnchor.MiddleLeft;
+            actionLayout.childControlWidth = true;
+            actionLayout.childForceExpandWidth = false;
+            actionLayout.childControlHeight = true;
+            actionLayout.childForceExpandHeight = false;
+            return actionRow;
+        }
+
+        private RectTransform CreateNativeRowActionSlot(Transform parent, string text, bool enabled, float width, Action onClick, bool selected = false)
+        {
+            var slot = CreateRect("ULE_RowActionSlot_" + text, parent);
+            SetLayout(slot, minWidth: width, preferredWidth: width, minHeight: NativeButtonHeight, preferredHeight: NativeButtonHeight, flexibleWidth: 0f, flexibleHeight: 0f);
+
+            if (TryCreateNativeInspectButton(slot, text, enabled, onClick, width, selected, out var nativeButton))
+            {
+                var nativeSlot = slot.gameObject.AddComponent<NativeRowActionSlotVisual>();
+                nativeSlot.UsesNativeButton = true;
+                var nativeRect = ResolveNativeButtonRoot(nativeButton);
+                if (nativeRect != null)
+                {
+                    SetTopLeft(nativeRect, 0f, 0f, width, NativeButtonHeight);
+                    SetLayoutIgnore(nativeRect, true);
+                }
+
+                return slot;
+            }
+
+            var rect = CreatePanel(slot, "ULE_RowActionButton_" + text, selected ? AccentColor : enabled ? ButtonColor : ButtonDisabledColor);
+            SetTopLeft(rect, 0f, 0f, width, NativeButtonHeight);
+            SetLayout(rect, minWidth: width, preferredWidth: width, minHeight: NativeButtonHeight, preferredHeight: NativeButtonHeight, flexibleWidth: 0f, flexibleHeight: 0f);
+            var image = rect.GetComponent<Image>();
+            if (image != null)
+            {
+                image.raycastTarget = enabled;
+            }
+
+            var button = rect.gameObject.AddComponent<Button>();
+            button.targetGraphic = image;
+            button.interactable = enabled;
+            if (enabled && onClick != null)
+            {
+                button.onClick.AddListener(() => onClick());
+            }
+
+            var label = CreateNativeLabel(rect, text, 11f, bold: true);
+            if (label != null)
+            {
+                label.name = "ULE_RowActionLabel";
+                label.alignment = TextAlignmentOptions.Center;
+                label.color = enabled ? TextColor : SubtleTextColor;
+                label.raycastTarget = false;
+                NormalizeNativeTextVisual(label);
+                Stretch(label.rectTransform);
+                SetLayoutIgnore(label.rectTransform, true);
+            }
+
+            return slot;
+        }
+
+        private static RectTransform ResolveNativeButtonRoot(Button button)
+        {
+            var rect = button != null ? button.transform as RectTransform : null;
+            for (var current = rect; current != null; current = current.parent as RectTransform)
+            {
+                if ((current.name ?? string.Empty).StartsWith("ULE_NativeButton_", StringComparison.Ordinal))
+                {
+                    return current;
+                }
+            }
+
+            return rect;
+        }
+
+        private void ResetNativeRowActionRouter(RectTransform row)
+        {
+            var router = row != null ? row.GetComponent<NativeRowActionClickRouter>() : null;
+            if (router != null)
+            {
+                router.Clear();
+            }
+        }
+
+        private void AddNativeRowActionRoute(RectTransform row, RectTransform visualRect, bool enabled, Action onClick)
+        {
+            if (row == null || visualRect == null)
+            {
+                return;
+            }
+
+            var nativeSlot = visualRect.GetComponent<NativeRowActionSlotVisual>();
+            if (nativeSlot?.UsesNativeButton == true)
+            {
+                return;
+            }
+
+            var graphic = row.GetComponent<Graphic>();
+            if (graphic == null)
+            {
+                graphic = row.gameObject.AddComponent<Image>();
+                graphic.color = new Color(1f, 1f, 1f, 0.001f);
+            }
+
+            graphic.raycastTarget = true;
+            var router = row.GetComponent<NativeRowActionClickRouter>() ?? row.gameObject.AddComponent<NativeRowActionClickRouter>();
+            router.AddAction(visualRect, enabled, onClick);
         }
 
         private void AddNativeCompareStatusLabel(RectTransform row, CachedItemRow rowData)
@@ -3877,18 +4390,18 @@ namespace ULE.SpawnEditor
                 $"Weight: {item.Weight:0.###}"
             };
 
+            if (PresetPreviewBridge.CanOpen(item))
+            {
+                var childCount = CountChildNodes(item.Children);
+                if (childCount > 0)
+                {
+                    parts.Add($"Parts: {childCount}");
+                }
+            }
+
             if (!string.IsNullOrWhiteSpace(item.PresetName))
             {
                 parts.Add($"Preset: {item.PresetName.Trim()}");
-            }
-
-            if (PresetPreviewBridge.CanOpen(item))
-            {
-                var childCount = item.Children?.Count ?? 0;
-                if (childCount > 0)
-                {
-                    parts.Add($"+{childCount}");
-                }
             }
 
             return string.Join("  |  ", parts);
@@ -4013,18 +4526,18 @@ namespace ULE.SpawnEditor
 
         private static void EnsureEntitiesPanelFields()
         {
-            _entitiesPanelContentField ??= typeof(EntitiesPanel).GetField("_entityListContent", BindingFlags.Instance | BindingFlags.NonPublic);
-            _entitiesPanelElementField ??= typeof(EntitiesPanel).GetField("_entityListElement", BindingFlags.Instance | BindingFlags.NonPublic);
+            _entitiesPanelContentField ??= typeof(EntitiesPanel).GetField("_entityListContent", InstanceFieldFlags);
+            _entitiesPanelElementField ??= typeof(EntitiesPanel).GetField("_entityListElement", InstanceFieldFlags);
         }
 
         private static void EnsureHandbookRowFields()
         {
-            _handbookEntityNameField ??= typeof(EntityListElement).GetField("_name", BindingFlags.Instance | BindingFlags.NonPublic);
-            _handbookEntityCategoryField ??= typeof(EntityListElement).GetField("_itemCategory", BindingFlags.Instance | BindingFlags.NonPublic);
-            _handbookEntityBackgroundField ??= typeof(EntityListElement).GetField("_background", BindingFlags.Instance | BindingFlags.NonPublic);
-            _handbookEntityIconField ??= typeof(EntityListElement).GetField("_icon", BindingFlags.Instance | BindingFlags.NonPublic);
-            _handbookEntityWishlistPanelField ??= typeof(EntityListElement).GetField("_wishlistPanel", BindingFlags.Instance | BindingFlags.NonPublic);
-            _handbookEntityNewNodeObjectField ??= typeof(EntityListElement).GetField("_newNodeObject", BindingFlags.Instance | BindingFlags.NonPublic);
+            _handbookEntityNameField ??= typeof(EntityListElement).GetField("_name", InstanceFieldFlags);
+            _handbookEntityCategoryField ??= typeof(EntityListElement).GetField("_itemCategory", InstanceFieldFlags);
+            _handbookEntityBackgroundField ??= typeof(EntityListElement).GetField("_background", InstanceFieldFlags);
+            _handbookEntityIconField ??= typeof(EntityListElement).GetField("_icon", InstanceFieldFlags);
+            _handbookEntityWishlistPanelField ??= typeof(EntityListElement).GetField("_wishlistPanel", InstanceFieldFlags);
+            _handbookEntityNewNodeObjectField ??= typeof(EntityListElement).GetField("_newNodeObject", InstanceFieldFlags);
         }
 
         private static void KeepHandbookIconFrameOnly(GameObject iconObject)
@@ -4204,6 +4717,191 @@ namespace ULE.SpawnEditor
             return TryCreateNativeInspectButton(parent, text, enabled, onClick, width, selected, out _);
         }
 
+        private Toggle CreateNativeCheckboxAt(
+            Transform parent,
+            string name,
+            string labelText,
+            bool value,
+            bool enabled,
+            Action<bool> onChanged,
+            float x,
+            float y,
+            float width,
+            float height)
+        {
+            var row = CreateRect(name, parent);
+            SetTopLeft(row, x, y, width, height);
+
+            var raycast = AddImage(row.gameObject, new Color(0f, 0f, 0f, 0f));
+            raycast.raycastTarget = true;
+
+            var layout = row.gameObject.AddComponent<HorizontalLayoutGroup>();
+            layout.spacing = 6f;
+            layout.childAlignment = TextAnchor.MiddleLeft;
+            layout.childControlWidth = true;
+            layout.childForceExpandWidth = false;
+            layout.childControlHeight = true;
+            layout.childForceExpandHeight = false;
+
+            TryResolveNativeToggleGraphics(out var targetGraphicTemplate, out var checkGraphicTemplate);
+
+            var box = CreateRect("Box", row);
+            SetLayout(box, minWidth: NativeCheckboxSize, preferredWidth: NativeCheckboxSize, minHeight: NativeCheckboxSize, preferredHeight: NativeCheckboxSize, flexibleWidth: 0f, flexibleHeight: 0f);
+            var boxGraphic = CopyNativeGraphicOrAddImage(targetGraphicTemplate, box.gameObject, new Color(0.02f, 0.025f, 0.03f, 0.95f));
+
+            var check = CreateRect("Check", box);
+            Stretch(check, 3f, 3f, 3f, 3f);
+            var checkGraphic = CopyNativeGraphicOrAddImage(checkGraphicTemplate, check.gameObject, AccentColor);
+
+            boxGraphic.raycastTarget = false;
+            checkGraphic.raycastTarget = false;
+
+            var label = CreateNativeLabel(row, labelText, 11f, bold: false, minWidth: width - NativeCheckboxSize - 8f);
+            if (label != null)
+            {
+                label.alignment = TextAlignmentOptions.MidlineLeft;
+                label.raycastTarget = false;
+                label.alpha = enabled ? label.alpha : label.alpha * 0.55f;
+            }
+
+            var toggle = row.gameObject.AddComponent<Toggle>();
+            toggle.targetGraphic = boxGraphic;
+            toggle.graphic = checkGraphic;
+            toggle.isOn = value;
+            toggle.interactable = enabled;
+            toggle.onValueChanged.AddListener(next => onChanged?.Invoke(next));
+            return toggle;
+        }
+
+        private static Graphic CopyNativeGraphicOrAddImage(Graphic source, GameObject target, Color fallbackColor)
+        {
+            if (source != null)
+            {
+                CopyNativeGraphic(source, target);
+            }
+
+            var graphic = target.GetComponent<Graphic>();
+            if (graphic != null)
+            {
+                return graphic;
+            }
+
+            var fallback = target.AddComponent<Image>();
+            fallback.color = fallbackColor;
+            return fallback;
+        }
+
+        private static void TryResolveNativeToggleGraphics(out Graphic targetGraphic, out Graphic checkGraphic)
+        {
+            targetGraphic = null;
+            checkGraphic = null;
+
+            var checkboxBackground = ResolveNativeCheckboxBackgroundTemplate();
+            if (checkboxBackground != null)
+            {
+                targetGraphic = checkboxBackground.GetComponent<Graphic>();
+                checkGraphic = checkboxBackground.Find("Checkmark")?.GetComponent<Graphic>()
+                               ?? checkboxBackground.GetComponentsInChildren<Graphic>(true)
+                                   .FirstOrDefault(graphic => graphic != null && graphic.transform != checkboxBackground);
+                if (targetGraphic != null || checkGraphic != null)
+                {
+                    return;
+                }
+            }
+
+            var template = ResolveNativeToggleTemplate();
+            if (template == null)
+            {
+                return;
+            }
+
+            targetGraphic = template.targetGraphic;
+            checkGraphic = template.graphic;
+            if (checkGraphic != null)
+            {
+                return;
+            }
+
+            var targetTransform = targetGraphic != null ? targetGraphic.transform : null;
+            checkGraphic = template.GetComponentsInChildren<Graphic>(true)
+                .FirstOrDefault(graphic => graphic != null && graphic.transform != targetTransform);
+        }
+
+        private static Toggle ResolveNativeToggleTemplate()
+        {
+            if (_nativeToggleTemplate != null)
+            {
+                return _nativeToggleTemplate;
+            }
+
+            _nativeToggleTemplate = Resources.FindObjectsOfTypeAll<Toggle>()
+                .Where(IsUsableNativeToggleTemplate)
+                .OrderByDescending(toggle =>
+                {
+                    var path = GetTransformPath(toggle.transform);
+                    var score = 0;
+                    var typeName = toggle.GetType().Name;
+                    if (typeName.IndexOf("SettingToggle", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        typeName.IndexOf("UpdatableToggle", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        score += 100;
+                    }
+
+                    if (toggle.name.IndexOf("Toggle", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        toggle.name.IndexOf("Checkbox", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        score += 40;
+                    }
+
+                    if (path.IndexOf("Settings", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        score += 25;
+                    }
+
+                    return score;
+                })
+                .FirstOrDefault();
+
+            return _nativeToggleTemplate;
+        }
+
+        private static RectTransform ResolveNativeCheckboxBackgroundTemplate()
+        {
+            if (_nativeCheckboxBackgroundTemplate != null)
+            {
+                return _nativeCheckboxBackgroundTemplate;
+            }
+
+            _nativeCheckboxBackgroundTemplate = Resources.FindObjectsOfTypeAll<RectTransform>()
+                .Where(rect => rect != null && string.Equals(rect.name, "Backround", StringComparison.Ordinal))
+                .Select(rect => new { Rect = rect, Path = GetTransformPath(rect) })
+                .Where(candidate =>
+                    candidate.Path.IndexOf("ULE_", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    candidate.Path.IndexOf(NativeCheckboxBackgroundPath, StringComparison.OrdinalIgnoreCase) >= 0)
+                .OrderByDescending(candidate => string.Equals(candidate.Path, NativeCheckboxBackgroundPath, StringComparison.Ordinal))
+                .Select(candidate => candidate.Rect)
+                .FirstOrDefault();
+
+            return _nativeCheckboxBackgroundTemplate;
+        }
+
+        private static bool IsUsableNativeToggleTemplate(Toggle toggle)
+        {
+            if (toggle == null || toggle.transform == null)
+            {
+                return false;
+            }
+
+            var path = GetTransformPath(toggle.transform);
+            if (path.IndexOf("ULE_", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                path.IndexOf("TarkovStyleEditor", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return false;
+            }
+
+            return toggle.targetGraphic != null || toggle.graphic != null;
+        }
+
         private float GetNativeButtonHeight()
         {
             var rect = _inspectActionTemplate?.Transform as RectTransform;
@@ -4239,9 +4937,12 @@ namespace ULE.SpawnEditor
             ResetInspectActionButtons();
             ConfigureInspectFooterAddSearch(spawn);
 
-            CreateInspectActionButton("UNDO", CanUndoActiveSpawn, UndoActiveSpawnChange);
-            CreateInspectActionButton("REDO", CanRedoActiveSpawn, RedoActiveSpawnChange);
-            CreateInspectActionButton("SAVE", spawn != null, () => CloseEditor(save: true));
+            CreateInspectActionButton("COPY", spawn != null && spawn.DetailsLoaded, CopyActiveSpawnToClipboard, NativeFooterActionButtonWidth);
+            CreateInspectActionButton("PASTE", _viewMode == EditorViewMode.Edited && _viz.HasSpawnClipboard && spawn != null && spawn.DetailsLoaded, PasteSpawnClipboard, NativeFooterActionButtonWidth);
+            CreateInspectActionButton("REPLACE", _viewMode == EditorViewMode.Edited && _viz.HasSpawnClipboard && spawn != null && spawn.DetailsLoaded, ReplaceSpawnClipboard, NativeFooterActionButtonWidth);
+            CreateInspectActionButton("UNDO", CanUndoActiveSpawn, UndoActiveSpawnChange, NativeFooterActionButtonWidth);
+            CreateInspectActionButton("REDO", CanRedoActiveSpawn, RedoActiveSpawnChange, NativeFooterActionButtonWidth);
+            CreateInspectActionButton("SAVE", spawn != null, SaveEditorEdits, NativeFooterActionButtonWidth);
             PositionInspectFooterActions();
         }
 
@@ -4266,7 +4967,7 @@ namespace ULE.SpawnEditor
                 return;
             }
 
-            const float searchBottom = 38f;
+            const float searchBottom = 64f;
             var input = CreateNativeInput(
                 _inspectFooterPanel,
                 "ULE_AddItemSearch",
@@ -4298,18 +4999,41 @@ namespace ULE.SpawnEditor
                 return;
             }
 
-            var actionWidth = NativeButtonWidth * 3f + NativeButtonSpacing * 2f;
-            SetBottomCenter(_inspectActionHost, 16f, actionWidth, GetNativeButtonHeight());
+            var buttonHeight = GetNativeButtonHeight();
+            var gridWidth = NativeFooterActionButtonWidth * 3f + NativeButtonSpacing * 2f;
+            var gridHeight = buttonHeight * 2f + NativeButtonSpacing;
+
+            var horizontal = _inspectActionHost.GetComponent<HorizontalLayoutGroup>();
+            if (horizontal != null)
+            {
+                horizontal.enabled = false;
+            }
+
+            var grid = _inspectActionHost.GetComponent<GridLayoutGroup>() ?? _inspectActionHost.gameObject.AddComponent<GridLayoutGroup>();
+            grid.cellSize = new Vector2(NativeFooterActionButtonWidth, buttonHeight);
+            grid.spacing = new Vector2(NativeButtonSpacing, NativeButtonSpacing);
+            grid.startCorner = GridLayoutGroup.Corner.UpperLeft;
+            grid.startAxis = GridLayoutGroup.Axis.Horizontal;
+            grid.childAlignment = TextAnchor.UpperCenter;
+            grid.constraint = GridLayoutGroup.Constraint.FixedColumnCount;
+            grid.constraintCount = 3;
+
+            SetBottomCenter(_inspectActionHost, 10f, gridWidth, gridHeight);
             _inspectActionHost.SetAsLastSibling();
             SetLayoutIgnore(_inspectActionHost, true);
         }
 
         private void CreateInspectActionButton(string text, bool enabled, Action onClick)
         {
+            CreateInspectActionButton(text, enabled, onClick, NativeButtonWidth);
+        }
+
+        private void CreateInspectActionButton(string text, bool enabled, Action onClick, float width)
+        {
             try
             {
                 var action = enabled && onClick != null ? onClick : new Action(() => { });
-                var button = _inspectActionContainer.method_1(
+                var button = _inspectActionContainer.CreateContextButton(
                     "ULE_" + text,
                     text,
                     _inspectActionTemplate,
@@ -4332,12 +5056,72 @@ namespace ULE.SpawnEditor
                     transform.gameObject.SetActive(true);
                 }
 
-                ConfigureNativeButtonSize(button, NativeButtonWidth, NativeButtonHeight);
+                ConfigureNativeButtonSize(button, width, NativeButtonHeight);
                 SetInspectActionButtonEnabled(button, enabled);
+                BindNativeUnityButtons(button, enabled, onClick);
             }
             catch (Exception ex)
             {
                 _log?.LogWarning($"[ULE] Failed to create native inspect action button '{text}': {ex.Message}");
+            }
+        }
+
+        private static Button BindNativeUnityButtons(SimpleContextMenuButton button, bool enabled, Action onClick)
+        {
+            if (button == null)
+            {
+                return null;
+            }
+
+            Button first = null;
+            foreach (var unityButton in button.GetComponentsInChildren<Button>(true))
+            {
+                first ??= unityButton;
+                BindNativeUnityButton(unityButton, enabled, onClick);
+            }
+
+            return first;
+        }
+
+        private static void BindNativeUnityButton(Button unityButton, bool enabled, Action onClick)
+        {
+            if (unityButton == null)
+            {
+                return;
+            }
+
+            unityButton.onClick.RemoveAllListeners();
+            unityButton.interactable = enabled;
+            if (unityButton.targetGraphic == null)
+            {
+                unityButton.targetGraphic = unityButton.GetComponent<Graphic>() ??
+                                            unityButton.GetComponentsInChildren<Graphic>(true).FirstOrDefault();
+            }
+
+            if (unityButton.targetGraphic != null)
+            {
+                unityButton.targetGraphic.raycastTarget = true;
+            }
+
+            foreach (var canvasGroup in unityButton.GetComponentsInParent<CanvasGroup>(true))
+            {
+                canvasGroup.interactable = enabled;
+                canvasGroup.blocksRaycasts = enabled;
+            }
+
+            foreach (var graphic in unityButton.GetComponentsInChildren<Graphic>(true))
+            {
+                if (graphic is TMP_Text)
+                {
+                    continue;
+                }
+
+                graphic.raycastTarget = enabled;
+            }
+
+            if (enabled && onClick != null)
+            {
+                unityButton.onClick.AddListener(() => onClick());
             }
         }
 
@@ -4410,6 +5194,10 @@ namespace ULE.SpawnEditor
             var indexText = CreateText(row, "CandidateIndex", $"Spawn {active}/{count}", 12, FontStyle.Normal, SubtleTextColor);
             indexText.alignment = TextAnchor.MiddleCenter;
             SetLayout(indexText.rectTransform, minWidth: 86f);
+
+            CreateButton(row, "Copy", spawn != null && spawn.DetailsLoaded, CopyActiveSpawnToClipboard, width: 56f);
+            CreateButton(row, "Paste", _viewMode == EditorViewMode.Edited && _viz.HasSpawnClipboard && spawn != null && spawn.DetailsLoaded, PasteSpawnClipboard, width: 58f);
+            CreateButton(row, "Replace", _viewMode == EditorViewMode.Edited && _viz.HasSpawnClipboard && spawn != null && spawn.DetailsLoaded, ReplaceSpawnClipboard, width: 70f);
 
             CreateModeButton(row, "Edited", EditorViewMode.Edited);
             CreateModeButton(row, "Vanilla", EditorViewMode.Vanilla);
@@ -4878,7 +5666,38 @@ namespace ULE.SpawnEditor
             }
 
             ClearPendingPreviewUndoSnapshot();
+            _log?.LogWarning($"[ULE] Failed to open item editor for {item.Tpl}: {(string.IsNullOrWhiteSpace(error) ? "unknown error" : error)}");
             ShowStatus(string.IsNullOrWhiteSpace(error) ? "Failed to open the preset screen." : error);
+        }
+
+        private void PreviewActiveSpawnItem(LootItem item)
+        {
+            if (_viz == null)
+            {
+                return;
+            }
+
+            _viz.PreviewActiveSpawnItem(item, out var message);
+            ShowStatus(message);
+            MarkDirtyAndRebuild();
+        }
+
+        private void SaveEditorEdits()
+        {
+            var active = _viz?.ActiveSpawn;
+            if (active == null)
+            {
+                ShowStatus("No spawn point is open.");
+                return;
+            }
+
+            if (_viz.ActiveSpawnHasUnsavedChanges)
+            {
+                _viz.CommitEdits(active);
+            }
+
+            NativeNotifications.Show("Changes saved");
+            ShowStatus("Changes saved");
         }
 
         private void HandleNativeWindowCloseRequest()
@@ -4909,7 +5728,7 @@ namespace ULE.SpawnEditor
 
             ReleaseInputCapture();
             _viz?.CloseEditorWithoutSaving();
-            LootEditorGUI.Open = false;
+            EditorWindowState.Open = false;
             HideRoot();
             DestroyEditorEventSystem();
             ResetWindowSessionState();
@@ -4962,6 +5781,8 @@ namespace ULE.SpawnEditor
                 _itemFilter ?? string.Empty,
                 _addQuery ?? string.Empty,
                 _suggestions.Count.ToString(CultureInfo.InvariantCulture),
+                _viz.HasSpawnClipboard ? "clipboard" : "noclipboard",
+                _viz.ActiveItemPlacementPreviewKey ?? string.Empty,
                 CanUndoActiveSpawn ? "undo" : "noundo",
                 CanRedoActiveSpawn ? "redo" : "noredo");
         }
@@ -5047,6 +5868,97 @@ namespace ULE.SpawnEditor
             }
 
             _viz.MarkActiveUnsaved();
+        }
+
+        private void ApplyEditedSpawnUseGravity(bool useGravity)
+        {
+            var active = _viz?.ActiveSpawn;
+            if (active == null)
+            {
+                MarkDirtyAndRebuild();
+                return;
+            }
+
+            if (active.UseGravity == useGravity)
+            {
+                MarkDirtyAndRebuild();
+                return;
+            }
+
+            PushUndoSnapshot("spawn-gravity", coalesce: false);
+            if (_viz.UpdateActiveSpawnUseGravity(useGravity))
+            {
+                ShowStatus(useGravity ? "Gravity enabled for this spawn." : "Gravity disabled for this spawn.");
+            }
+
+            MarkDirtyAndRebuild();
+        }
+
+        private void ApplyEditedSpawnPosition(Vector3 position, bool coalesce = false, bool rebuild = true)
+        {
+            var active = _viz?.ActiveSpawn;
+            if (active == null || AreVectorsClose(active.Position, position))
+            {
+                if (rebuild)
+                {
+                    MarkDirtyAndRebuild();
+                }
+
+                return;
+            }
+
+            PushUndoSnapshot("spawn-position", coalesce);
+            if (_viz.UpdateActiveSpawnPosition(position))
+            {
+                if (rebuild)
+                {
+                    ShowStatus("Updated spawn position.");
+                    MarkDirtyAndRebuild();
+                }
+            }
+        }
+
+        private void ApplyEditedSpawnName(string name)
+        {
+            var active = _viz?.ActiveSpawn;
+            var normalized = string.IsNullOrWhiteSpace(name) ? string.Empty : name.Trim();
+            if (active == null || !active.IsUserCreated || string.Equals(active.Name ?? string.Empty, normalized, StringComparison.Ordinal))
+            {
+                MarkDirtyAndRebuild();
+                return;
+            }
+
+            PushUndoSnapshot("spawn-name", coalesce: false);
+            if (_viz.UpdateActiveSpawnName(normalized))
+            {
+                ShowStatus("Updated spawn name.");
+                MarkDirtyAndRebuild();
+            }
+        }
+
+        private void ApplyEditedSpawnRotation(Vector3 rotation, bool coalesce = false, bool rebuild = true)
+        {
+            var active = _viz?.ActiveSpawn;
+            var normalized = NormalizeEuler(rotation);
+            if (active == null || AreVectorsClose(NormalizeEuler(active.Rotation), normalized))
+            {
+                if (rebuild)
+                {
+                    MarkDirtyAndRebuild();
+                }
+
+                return;
+            }
+
+            PushUndoSnapshot("spawn-rotation", coalesce);
+            if (_viz.UpdateActiveSpawnRotation(normalized))
+            {
+                if (rebuild)
+                {
+                    ShowStatus("Updated spawn rotation.");
+                    MarkDirtyAndRebuild();
+                }
+            }
         }
 
         private void ApplyAlwaysSpawnToggle(SpawnPointData spawn, SpawnPointData vanilla, bool enabled)
@@ -5179,6 +6091,7 @@ namespace ULE.SpawnEditor
             PushHistorySnapshot(_redoHistory, current);
             RestoreActiveSpawnSnapshot(previous);
             ResetUndoCoalescing();
+            NativeNotifications.Show("Undo");
             ShowStatus("Undo applied.");
         }
 
@@ -5194,6 +6107,7 @@ namespace ULE.SpawnEditor
             PushHistorySnapshot(_undoHistory, current);
             RestoreActiveSpawnSnapshot(next);
             ResetUndoCoalescing();
+            NativeNotifications.Show("Redo");
             ShowStatus("Redo applied.");
         }
 
@@ -5351,7 +6265,7 @@ namespace ULE.SpawnEditor
                 }
                 else
                 {
-                    GClass3746.SetCursor(cursor);
+                    EFT.UI.CursorSwitcher.SetCursor(cursor);
                 }
 
                 _lastAppliedEditorCursor = cursor;
@@ -5365,18 +6279,7 @@ namespace ULE.SpawnEditor
 
         private static void ForceApplyEditorCursor(ECursorType cursor)
         {
-            var actualCursor = cursor == ECursorType.Idle ? GClass3746.EcursorType_0 : cursor;
-            if (GClass3746.Dictionary_0 != null &&
-                GClass3746.Dictionary_0.TryGetValue(actualCursor, out var cursorData) &&
-                cursorData != null)
-            {
-                GClass3746.PreviousType = cursor;
-                GClass3746.EcursorType_1 = actualCursor;
-                GClass3746.smethod_0(cursorData);
-                return;
-            }
-
-            GClass3746.SetCursor(cursor);
+            EFT.UI.CursorSwitcher.SetCursor(cursor);
         }
 
         private void ReleaseInputCapture()
@@ -5733,7 +6636,7 @@ namespace ULE.SpawnEditor
             try
             {
                 var action = enabled && onClick != null ? onClick : new Action(() => { });
-                var button = _inspectActionContainer.method_1(
+                var button = _inspectActionContainer.CreateContextButton(
                     "ULE_BODY_" + SanitizeButtonKey(text) + "_" + container.childCount.ToString(CultureInfo.InvariantCulture),
                     text,
                     _inspectActionTemplate,
@@ -5759,8 +6662,13 @@ namespace ULE.SpawnEditor
                 button.Blocked = selected;
                 SetInspectActionButtonEnabled(button, enabled);
 
-                unityButton = button.GetComponentsInChildren<Button>(true).FirstOrDefault();
-                return unityButton != null;
+                unityButton = BindNativeUnityButtons(button, enabled, onClick);
+                if (unityButton == null)
+                {
+                    return false;
+                }
+
+                return true;
             }
             catch (Exception ex)
             {
@@ -6091,7 +6999,7 @@ namespace ULE.SpawnEditor
 
             if (_browseSearchInputField == null)
             {
-                _browseSearchInputField = typeof(BrowseCategoriesPanel).GetField("SearchInputField", BindingFlags.Instance | BindingFlags.NonPublic);
+                _browseSearchInputField = typeof(BrowseCategoriesPanel).GetField("SearchInputField", InstanceFieldFlags);
             }
 
             if (_browseSearchInputField != null)
@@ -6595,15 +7503,6 @@ namespace ULE.SpawnEditor
                 label = $"{item.PresetName.Trim()} ({baseName})";
             }
 
-            if (PresetPreviewBridge.CanOpen(item))
-            {
-                var childCount = CountChildNodes(item.Children);
-                if (childCount > 0)
-                {
-                    label = $"{label} [+{childCount}]";
-                }
-            }
-
             return label;
         }
 
@@ -6723,6 +7622,22 @@ namespace ULE.SpawnEditor
             return item.Tpl ?? "unknown";
         }
 
+        private static bool AreVectorsClose(Vector3 left, Vector3 right)
+        {
+            return (left - right).sqrMagnitude <= 0.000001f;
+        }
+
+        private static Vector3 NormalizeEuler(Vector3 value)
+        {
+            return new Vector3(NormalizeAngle(value.x), NormalizeAngle(value.y), NormalizeAngle(value.z));
+        }
+
+        private static float NormalizeAngle(float value)
+        {
+            value %= 360f;
+            return value < 0f ? value + 360f : value;
+        }
+
         private static bool AreSpawnSnapshotsEquivalent(SpawnPointData left, SpawnPointData right)
         {
             if (left == null || right == null)
@@ -6732,6 +7647,12 @@ namespace ULE.SpawnEditor
 
             if (!string.Equals(left.Id, right.Id, StringComparison.Ordinal) ||
                 Math.Abs(left.SpawnChance - right.SpawnChance) > 0.0001f)
+            {
+                return false;
+            }
+
+            if (!AreVectorsClose(left.Position, right.Position) ||
+                !AreVectorsClose(NormalizeEuler(left.Rotation), NormalizeEuler(right.Rotation)))
             {
                 return false;
             }
@@ -6847,6 +7768,69 @@ namespace ULE.SpawnEditor
         {
             public string Text;
             public Action OnClick;
+        }
+
+        private sealed class NativeRowActionClickRouter : MonoBehaviour, IPointerClickHandler
+        {
+            private readonly List<RowAction> _actions = new List<RowAction>();
+
+            public void Clear()
+            {
+                _actions.Clear();
+            }
+
+            public void AddAction(RectTransform rect, bool enabled, Action onClick)
+            {
+                if (rect == null || onClick == null)
+                {
+                    return;
+                }
+
+                _actions.Add(new RowAction
+                {
+                    Rect = rect,
+                    Enabled = enabled,
+                    OnClick = onClick
+                });
+            }
+
+            public void OnPointerClick(PointerEventData eventData)
+            {
+                if (eventData == null || eventData.button != PointerEventData.InputButton.Left)
+                {
+                    return;
+                }
+
+                for (var i = _actions.Count - 1; i >= 0; i--)
+                {
+                    var action = _actions[i];
+                    if (!action.Enabled || action.Rect == null)
+                    {
+                        continue;
+                    }
+
+                    if (!RectTransformUtility.RectangleContainsScreenPoint(action.Rect, eventData.position, eventData.pressEventCamera))
+                    {
+                        continue;
+                    }
+
+                    eventData.Use();
+                    action.OnClick?.Invoke();
+                    return;
+                }
+            }
+
+            private sealed class RowAction
+            {
+                public RectTransform Rect;
+                public bool Enabled;
+                public Action OnClick;
+            }
+        }
+
+        private sealed class NativeRowActionSlotVisual : MonoBehaviour
+        {
+            public bool UsesNativeButton;
         }
 
         private sealed class NativeButtonStrip
@@ -7025,6 +8009,106 @@ namespace ULE.SpawnEditor
             public string EditedWeightText;
             public string Status;
             public string SearchText;
+        }
+
+        private sealed class NativeNumericDragHandler : MonoBehaviour, IBeginDragHandler, IDragHandler, IEndDragHandler
+        {
+            private TMP_InputField _input;
+            private Func<float, string> _formatValue;
+            private Action<float> _onValueChanged;
+            private Action _onDragFinished;
+            private Vector2 _startPointer;
+            private float _startValue;
+            private bool _dragging;
+
+            public void Init(
+                TMP_InputField input,
+                float fallbackValue,
+                Func<float, string> formatValue,
+                Action<float> onValueChanged,
+                Action onDragFinished)
+            {
+                _input = input;
+                _startValue = fallbackValue;
+                _formatValue = formatValue;
+                _onValueChanged = onValueChanged;
+                _onDragFinished = onDragFinished;
+            }
+
+            public void OnBeginDrag(PointerEventData eventData)
+            {
+                if (_input == null || eventData == null || !IsEnabled)
+                {
+                    return;
+                }
+
+                _dragging = true;
+                _startPointer = eventData.position;
+                if (!float.TryParse(_input.text, NumberStyles.Float, CultureInfo.InvariantCulture, out _startValue))
+                {
+                    _startValue = 0f;
+                }
+            }
+
+            public void OnDrag(PointerEventData eventData)
+            {
+                if (!_dragging || _input == null || eventData == null)
+                {
+                    return;
+                }
+
+                if (!IsEnabled)
+                {
+                    _dragging = false;
+                    _onDragFinished?.Invoke();
+                    return;
+                }
+
+                var deltaX = eventData.position.x - _startPointer.x;
+                var sign = Mathf.Sign(deltaX);
+                var magnitude = Mathf.Abs(deltaX);
+                var valueDelta = sign * (magnitude * 0.004f + magnitude * magnitude * 0.00015f);
+                if (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift))
+                {
+                    valueDelta *= 4f;
+                }
+                else if (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl))
+                {
+                    valueDelta *= 0.25f;
+                }
+
+                var nextValue = _startValue + valueDelta;
+                var text = _formatValue != null ? _formatValue(nextValue) : FormatCoordinate(nextValue);
+                _input.SetTextWithoutNotify(text);
+                _input.caretPosition = _input.text.Length;
+                _input.stringPosition = _input.text.Length;
+                _onValueChanged?.Invoke(nextValue);
+                eventData.Use();
+            }
+
+            public void OnEndDrag(PointerEventData eventData)
+            {
+                if (!_dragging)
+                {
+                    return;
+                }
+
+                _dragging = false;
+                _onDragFinished?.Invoke();
+            }
+
+            private static bool IsEnabled => Plugin.EnableDragValueEditing == null || Plugin.EnableDragValueEditing.Value;
+
+            private void OnDisable()
+            {
+                if (!_dragging)
+                {
+                    return;
+                }
+
+                _dragging = false;
+                _onDragFinished?.Invoke();
+            }
         }
 
         private sealed class DraggableWindow : MonoBehaviour, IBeginDragHandler, IDragHandler

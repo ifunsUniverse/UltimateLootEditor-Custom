@@ -9,13 +9,17 @@ namespace ULE.SpawnEditor
     {
         public string Id;
         public string DetailKey;
+        public string Name;
         public Vector3 Position;
+        public Vector3 Rotation;
         public float SpawnChance = 1f; // [0..1]
         public bool HasAlwaysSpawnFlag;
         public bool IsAlwaysSpawn;
+        public bool UseGravity = true;
         public int ItemCountSummary;
         public bool DetailsLoaded;
         public int DataVersion;
+        public bool IsUserCreated;
         public List<LootItem> Items = new List<LootItem>();
 
         public SpawnPointData Clone()
@@ -24,13 +28,17 @@ namespace ULE.SpawnEditor
             {
                 Id = Id,
                 DetailKey = DetailKey,
+                Name = Name,
                 Position = Position,
+                Rotation = Rotation,
                 SpawnChance = SpawnChance,
                 HasAlwaysSpawnFlag = HasAlwaysSpawnFlag,
                 IsAlwaysSpawn = IsAlwaysSpawn,
+                UseGravity = UseGravity,
                 ItemCountSummary = ItemCountSummary,
                 DetailsLoaded = DetailsLoaded,
                 DataVersion = DataVersion,
+                IsUserCreated = IsUserCreated,
                 Items = Items?.Select(item => item?.Clone())
                     .Where(item => item != null)
                     .ToList() ?? new List<LootItem>()
@@ -46,13 +54,17 @@ namespace ULE.SpawnEditor
 
             Id = other.Id;
             DetailKey = other.DetailKey;
+            Name = other.Name;
             Position = other.Position;
+            Rotation = other.Rotation;
             SpawnChance = other.SpawnChance;
             HasAlwaysSpawnFlag = other.HasAlwaysSpawnFlag;
             IsAlwaysSpawn = other.IsAlwaysSpawn;
+            UseGravity = other.UseGravity;
             ItemCountSummary = other.ItemCountSummary;
             DetailsLoaded = other.DetailsLoaded;
             DataVersion = other.DataVersion;
+            IsUserCreated = other.IsUserCreated;
             Items = other.Items?.Select(item => item?.Clone())
                 .Where(item => item != null)
                 .ToList() ?? new List<LootItem>();
@@ -124,6 +136,11 @@ namespace ULE.SpawnEditor
     {
         public float? SpawnChance;           // null = unchanged
         public bool? IsAlwaysSpawn;          // null = unchanged/legacy chance-derived behavior
+        public bool? UseGravity;             // null = unchanged/legacy default
+        public bool? IsCreated;
+        public string Name;
+        public SavedVector3 Position;
+        public SavedVector3 Rotation;
         public List<LootItem> Items;         // if null = unchanged; if empty = clears
     }
 
@@ -131,6 +148,28 @@ namespace ULE.SpawnEditor
     {
         public string MapId;
         public Dictionary<string, SpawnEdit> BySpawnId = new Dictionary<string, SpawnEdit>();
+    }
+
+    internal class SavedVector3
+    {
+        public double X;
+        public double Y;
+        public double Z;
+
+        public static SavedVector3 FromUnity(Vector3 value)
+        {
+            return new SavedVector3
+            {
+                X = value.x,
+                Y = value.y,
+                Z = value.z
+            };
+        }
+
+        public Vector3 ToUnity()
+        {
+            return new Vector3((float)X, (float)Y, (float)Z);
+        }
     }
 
     internal class SearchCandidate

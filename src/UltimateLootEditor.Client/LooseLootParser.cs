@@ -331,6 +331,9 @@ namespace ULE.SpawnEditor
                 return false;
             }
 
+            var rot = ReadVec3(GetPropertyOrDefault(templ, "Rotation")) ??
+                      ReadVec3(GetPropertyOrDefault(entry, "rotation")) ??
+                      ReadVec3(GetPropertyOrDefault(entry, "Rotation"));
             var id = GetStringProperty(templ, "Id") ??
                      GetStringProperty(entry, "locationId") ??
                      GetStringProperty(entry, "name") ??
@@ -339,15 +342,20 @@ namespace ULE.SpawnEditor
             var templateItems = GetArrayProperty(templ, "Items");
             var alwaysSpawn = ReadBool(GetPropertyOrDefault(templ, "IsAlwaysSpawn")) ??
                               ReadBool(GetPropertyOrDefault(entry, "IsAlwaysSpawn"));
+            var useGravity = ReadBool(GetPropertyOrDefault(templ, "UseGravity")) ??
+                             ReadBool(GetPropertyOrDefault(entry, "UseGravity")) ??
+                             true;
 
             spawn = new SpawnPointData
             {
                 Id = string.IsNullOrWhiteSpace(id) ? MakeSyntheticId(pos.Value, syntheticIndex) : id,
                 DetailKey = string.IsNullOrWhiteSpace(id) ? MakeSyntheticId(pos.Value, syntheticIndex) : id,
                 Position = pos.Value,
+                Rotation = rot ?? Vector3.zero,
                 SpawnChance = Mathf.Clamp01(ReadFloat(GetPropertyOrDefault(entry, "probability")) ?? 1f),
                 HasAlwaysSpawnFlag = alwaysSpawn.HasValue,
                 IsAlwaysSpawn = alwaysSpawn ?? false,
+                UseGravity = useGravity,
                 ItemCountSummary = includeItems ? items.Count : templateItems?.Count ?? 0,
                 DetailsLoaded = includeItems,
                 DataVersion = includeItems ? 1 : 0,
@@ -367,20 +375,25 @@ namespace ULE.SpawnEditor
                 return false;
             }
 
+            var rot = ReadVec3(GetPropertyOrDefault(entry, "rotation")) ??
+                      ReadVec3(GetPropertyOrDefault(entry, "Rotation"));
             var id = GetStringProperty(entry, "name") ?? GetStringProperty(entry, "id");
             var arr = GetArrayProperty(entry, "items");
             var items = includeItems ? ReadClassicItems(arr) : new List<LootItem>();
             var spawnId = string.IsNullOrWhiteSpace(id) ? MakeSyntheticId(pos.Value, syntheticIndex) : id;
             var alwaysSpawn = ReadBool(GetPropertyOrDefault(entry, "IsAlwaysSpawn"));
+            var useGravity = ReadBool(GetPropertyOrDefault(entry, "UseGravity")) ?? true;
 
             spawn = new SpawnPointData
             {
                 Id = spawnId,
                 DetailKey = spawnId,
                 Position = pos.Value,
+                Rotation = rot ?? Vector3.zero,
                 SpawnChance = Mathf.Clamp01(ReadFloat(GetPropertyOrDefault(entry, "probability")) ?? 1f),
                 HasAlwaysSpawnFlag = alwaysSpawn.HasValue,
                 IsAlwaysSpawn = alwaysSpawn ?? false,
+                UseGravity = useGravity,
                 ItemCountSummary = includeItems ? items.Count : arr?.Count ?? 0,
                 DetailsLoaded = includeItems,
                 DataVersion = includeItems ? 1 : 0,

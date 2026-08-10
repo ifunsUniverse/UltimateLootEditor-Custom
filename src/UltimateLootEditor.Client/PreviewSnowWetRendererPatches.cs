@@ -1,12 +1,20 @@
+using System;
+using System.Collections.Generic;
+using System.Reflection;
 using EFT.UI.Screens;
 using HarmonyLib;
 using UnityEngine;
 
 namespace ULE.SpawnEditor
 {
-    [HarmonyPatch(typeof(SnowWetRenderer), "smethod_0")]
+    [HarmonyPatch]
     internal static class PreviewSnowWetRendererPatch
     {
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            return SnowWetRendererPatchTargets.Find("OnScreenChanged", typeof(EEftScreenType));
+        }
+
         private static void Prefix(ref EEftScreenType screenType)
         {
             if (PresetPreviewBridge.IsPreviewTransitionActiveOrOpen)
@@ -45,9 +53,14 @@ namespace ULE.SpawnEditor
         }
     }
 
-    [HarmonyPatch(typeof(SnowWetRenderer), "method_3")]
+    [HarmonyPatch]
     internal static class PreviewSnowWetRendererCameraPatch
     {
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            return SnowWetRendererPatchTargets.Find("OnPreCullCallback", typeof(Camera));
+        }
+
         private static void Prefix(Camera currentCamera)
         {
             PresetPreviewBridge.RecordSnowPreCullCamera(currentCamera);
@@ -58,6 +71,20 @@ namespace ULE.SpawnEditor
         private static void Postfix(Camera currentCamera)
         {
             PresetPreviewBridge.EndSnowCommandBufferCameraOverride(currentCamera);
+        }
+    }
+
+    internal static class SnowWetRendererPatchTargets
+    {
+        public static IEnumerable<MethodBase> Find(string methodName, params Type[] parameters)
+        {
+            var flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+
+            var method = typeof(SnowWetRenderer).GetMethod(methodName, flags, null, parameters ?? Type.EmptyTypes, null);
+            if (method != null)
+            {
+                yield return method;
+            }
         }
     }
 }

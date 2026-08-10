@@ -193,12 +193,12 @@ namespace ULE.SpawnEditor
         {
             try
             {
-                if (!Singleton<ItemFactoryClass>.Instantiated)
+                if (!Singleton<EFT.ItemFactory>.Instantiated)
                 {
                     return;
                 }
 
-                var itemFactory = Singleton<ItemFactoryClass>.Instance;
+                var itemFactory = Singleton<EFT.ItemFactory>.Instance;
                 var templates = itemFactory?.ItemTemplates;
                 var count = templates?.Count ?? 0;
                 if (count == 0)

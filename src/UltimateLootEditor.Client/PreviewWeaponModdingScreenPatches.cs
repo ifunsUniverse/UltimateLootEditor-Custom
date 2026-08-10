@@ -26,7 +26,7 @@ namespace ULE.SpawnEditor
     {
         private static MethodBase TargetMethod()
         {
-            return typeof(ItemObserveScreen<WeaponModdingScreen.GClass3922, WeaponModdingScreen>).GetMethod(
+            return typeof(ItemObserveScreen<WeaponModdingScreen.WeaponModdingScreenController, WeaponModdingScreen>).GetMethod(
                 "Close",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         }
@@ -37,7 +37,7 @@ namespace ULE.SpawnEditor
         }
     }
 
-    [HarmonyPatch(typeof(EditBuildScreen), "Show", new[] { typeof(Item), typeof(Item), typeof(InventoryController), typeof(ISession) })]
+    [HarmonyPatch(typeof(EditBuildScreen), "Show", new[] { typeof(Item), typeof(Item), typeof(InventoryController), typeof(EFT.IEftSession) })]
     internal static class PreviewEditBuildScreenShowPatch
     {
         private static void Prefix()
@@ -57,7 +57,7 @@ namespace ULE.SpawnEditor
     {
         private static MethodBase TargetMethod()
         {
-            return typeof(ItemObserveScreen<EditBuildScreen.GClass3881, EditBuildScreen>).GetMethod(
+            return typeof(ItemObserveScreen<EditBuildScreen.EditBuildScreenController, EditBuildScreen>).GetMethod(
                 "Close",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         }
@@ -71,7 +71,7 @@ namespace ULE.SpawnEditor
     [HarmonyPatch(typeof(EditBuildScreen), nameof(EditBuildScreen.CreateBuildManipulation))]
     internal static class PreviewEditBuildCreateManipulationPatch
     {
-        private static bool Prefix(EditBuildScreen __instance, ref GClass3467 __result, out long __state)
+        private static bool Prefix(EditBuildScreen __instance, ref EFT.InventoryLogic.DropdownManipulation __result, out long __state)
         {
             __state = PresetPreviewBridge.BeginEditOpenTimingStage("EditBuildScreen.CreateBuildManipulation");
             if (PresetPreviewBridge.TryCreateFastEditBuildManipulation(__instance, out var manipulation))
@@ -144,7 +144,7 @@ namespace ULE.SpawnEditor
         }
     }
 
-    [HarmonyPatch(typeof(PoolManagerClass), nameof(PoolManagerClass.CreateCleanLootPrefab), new[] { typeof(Item), typeof(ECameraType), typeof(IPlayer) })]
+    [HarmonyPatch(typeof(EFT.ObjectsFactory), nameof(EFT.ObjectsFactory.CreateCleanLootPrefab), new[] { typeof(Item), typeof(ECameraType), typeof(IPlayer) })]
     internal static class PreviewPoolManagerCreateCleanLootPrefabTimingPatch
     {
         private static void Prefix(Item item, out long __state)
@@ -182,7 +182,7 @@ namespace ULE.SpawnEditor
     {
         private static MethodBase TargetMethod()
         {
-            return typeof(ItemObserveScreen<EditBuildScreen.GClass3881, EditBuildScreen>).GetMethod(
+            return typeof(ItemObserveScreen<EditBuildScreen.EditBuildScreenController, EditBuildScreen>).GetMethod(
                 "RefreshWeapon",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         }
@@ -201,10 +201,16 @@ namespace ULE.SpawnEditor
     [HarmonyPatch]
     internal static class PreviewEditBuildSlotIconTimingPatch
     {
+        private static bool Prepare()
+        {
+            return TargetMethod() != null;
+        }
+
         private static MethodBase TargetMethod()
         {
-            return typeof(ItemObserveScreen<EditBuildScreen.GClass3881, EditBuildScreen>).GetMethod(
-                "method_6",
+            var screenType = typeof(ItemObserveScreen<EditBuildScreen.EditBuildScreenController, EditBuildScreen>);
+            return screenType.GetMethod(
+                "CreateModSlotViews",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
                 null,
                 new[] { typeof(CompoundItem) },
@@ -213,12 +219,12 @@ namespace ULE.SpawnEditor
 
         private static void Prefix(CompoundItem weapon, out long __state)
         {
-            __state = PresetPreviewBridge.BeginEditOpenTimingStage($"ItemObserveScreen.method_6.slotIcons({DescribeItem(weapon)})");
+            __state = PresetPreviewBridge.BeginEditOpenTimingStage($"ItemObserveScreen.CreateModSlotViews({DescribeItem(weapon)})");
         }
 
         private static void Postfix(long __state)
         {
-            PresetPreviewBridge.EndEditOpenTimingStage("ItemObserveScreen.method_6.slotIcons", __state);
+            PresetPreviewBridge.EndEditOpenTimingStage("ItemObserveScreen.CreateModSlotViews", __state);
             PresetPreviewBridge.CompleteEditOpenTiming("slot icons built");
         }
 
