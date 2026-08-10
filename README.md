@@ -1,8 +1,6 @@
 # Ultimate Loot Editor
 
-Ultimate Loot Editor is an in-raid loose loot editor for SPT. It lets you visualize loose loot spawn points, inspect what can spawn there, adjust spawn chances and item weights, add or remove items, and create new spawn points.
-
-The editor uses cloned in-game UI elements so it feels close to the native EFT interface instead of a separate debug menu.
+Ultimate Loot Editor is an in raid loose loot editor for SPT. It lets you visualize loose loot spawn points, inspect what can spawn there, adjust spawn chances and item weights, add or remove items, and create new spawn points.
 
 ## Installation
 
